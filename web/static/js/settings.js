@@ -27,6 +27,7 @@ export async function render(target) {
     try {
       const r = await post("/api/settings", body);
       message.replaceChildren(el("div", { class: "note ok" }, `Gespeichert in ${current.path}.${r.restart_needed ? " Die neue Datenbank gilt nach einem Neustart von viper-ai-web." : ""}`));
+      window.dispatchEvent(new Event("viper:status"));
     } catch (error) {
       message.replaceChildren(el("div", { class: "note error" }, `Nicht gespeichert: ${error.message}`));
     }

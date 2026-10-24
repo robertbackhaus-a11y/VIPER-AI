@@ -13,6 +13,7 @@ The web starts no job on its own: the scheduled jobs are Windows scheduled tasks
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime
@@ -32,6 +33,7 @@ from .views import jsonable
 
 STATIC = Path(__file__).resolve().parent / "static"
 ORCHESTRATOR_TTL_S = 60  # the orchestrator takes seconds; pages opened within this time share one result (refresh=true forces a new run)
+OLLAMA_STATUS_TIMEOUT_S = 1.5  # the header check of Ollama must not hold back the status line; details stay on the settings page
 
 
 def version() -> str:
@@ -97,6 +99,21 @@ class State:
         self._orchestrator = None
 
 
+async def ollama_status(settings) -> dict:
+    """A real check of the configured Ollama (``check_ollama``, the check of the diagnostics) with a short timeout.  Only chat and reasoning need
+    Ollama, so a failure is reported here and nothing else waits for it."""
+    from .deps import ollama_client
+
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(ollama_client.check_ollama, settings.ollama_base_url, OLLAMA_STATUS_TIMEOUT_S),
+                                        OLLAMA_STATUS_TIMEOUT_S * 2)
+    except asyncio.TimeoutError:
+        result = ollama_client.OllamaStatus(False, error="keine Antwort")
+    model = result.reachable and result.has_model(settings.ollama_model)
+    error = result.error if not result.reachable else "" if model else f"Modell {settings.ollama_model} nicht vorhanden"
+    return {"ok": bool(model), "reachable": result.reachable, "version": result.version, "model": settings.ollama_model, "error": error}
+
+
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -139,8 +156,8 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
     # -- status ---------------------------------------------------------------------------------------------------------------------
     @app.get("/api/status")
     async def status():
-        db = await state.engine.read("database_status")
-        return as_json({"version": version(), "database": db, "db_path": state.engine.db_path,
+        db, ollama = await asyncio.gather(state.engine.read("database_status"), ollama_status(state.settings))
+        return as_json({"version": version(), "database": db, "ollama": ollama, "db_path": state.engine.db_path,
                         "warnings": state.warnings + [w for w in settings_mod.runtime_warnings(state.settings) if "MCP-Server" not in w] + private_files_warning(state)})
 
     # -- portfolio (engine module portfolio_history) -----------------------------------------------------------------------------------

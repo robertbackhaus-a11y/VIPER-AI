@@ -3,7 +3,7 @@
 // Sektoren: sector treemap and tables, and the tab "Einzelwertrisiko" (effective single-name exposure) with its own treemap
 // (/api/views/sectors = the view models of the desktop page). Read-only; the risk guard is not changed here.
 
-import { el, echart, get, kv, panel, vmTable } from "./core.js";
+import { disposeCharts, el, echart, get, kv, panel, vmTable } from "./core.js";
 
 export async function render(target) {
   const data = await get("/api/views/sectors");
@@ -13,6 +13,7 @@ export async function render(target) {
   let tab = "sectors";
   const draw = () => {
     tabs.replaceChildren(...[["sectors", "Sektoren"], ["effective", "Einzelwertrisiko"]].map(([k, label]) => el("button", { class: k === tab ? "on" : "", onclick: () => { tab = k; draw(); } }, label)));
+    disposeCharts();
     if (tab === "sectors") sectorsTab(body, s); else effectiveTab(body, e);
   };
   target.replaceChildren(el("div", { class: "head" }, el("div", {}, el("h1", {}, "Sektoren"), el("div", { class: "muted small" }, `Stand ${s.refreshed} · nur lesend; der Risk-Guard wird hier nicht geändert`)),
@@ -24,14 +25,14 @@ const tooltip = { backgroundColor: "#0b1512", borderColor: "#1f4a35", textStyle:
 
 function sectorsTab(body, s) {
   if (!s.available) { body.replaceChildren(el("div", { class: "note error" }, s.error || "Keine Daten")); return; }
-  const map = el("div", { class: "chart", style: "height:460px" });
+  const map = el("div", { class: "chart map" });
   const table = (rows, levels) => ({ headers: [], rows, levels });
   body.replaceChildren(
-    el("div", { class: "grid cols-3" },
-      el("div", { class: "span-2" }, panel("Treemap (Fläche = Marktwert, Farbe = Tagesperformance)", map)),
-      panel("Überblick", kv(s.summary), s.notes.length ? s.notes.map((n) => el("div", { class: "note warning" }, n)) : null)),
+    panel("Treemap (Fläche = Marktwert, Farbe = Tagesperformance)", map),
+    el("div", { class: "grid cols-3", style: "margin-top:16px" },
+      panel("Überblick", kv(s.summary), s.notes.length ? s.notes.map((n) => el("div", { class: "note warning" }, n)) : null),
+      el("div", { class: "span-2" }, panel("Sektoren", vmTable({ ...table(s.sector_rows, s.sector_levels), headers: s.headers.sectors }, { numeric: [1, 2, 3, 4, 6] })))),
     el("div", { class: "grid", style: "margin-top:16px" },
-      panel("Sektoren", vmTable({ ...table(s.sector_rows, s.sector_levels), headers: s.headers.sectors }, { numeric: [1, 2, 3, 4, 6] })),
       panel("Positionen und Beiträge", vmTable({ ...table(s.position_rows, []), headers: s.headers.positions }, { numeric: [3, 4, 5] })),
       panel("ETF-Look-through", vmTable({ ...table(s.etf_rows, s.etf_levels), headers: s.headers.etfs }, { numeric: [1] }))));
   echart(map, {
@@ -52,7 +53,7 @@ function sectorsTab(body, s) {
 
 function effectiveTab(body, e) {
   if (!e.available) { body.replaceChildren(el("div", { class: "note error" }, e.error || "Keine Daten")); return; }
-  const map = el("div", { class: "chart", style: "height:420px" });
+  const map = el("div", { class: "chart map" });
   let sortCol = e.default_sort, down = true;
   const holder = el("div");
   const drawCompanies = () => {
@@ -70,13 +71,12 @@ function effectiveTab(body, e) {
       }, typeof v === "object" && v ? v.t : v))))))));
   };
   body.replaceChildren(
-    el("div", { class: "grid cols-3" },
-      el("div", { class: "span-2" }, panel(e.headline || "Einzelwertrisiko", el("p", { class: "muted small" }, e.headline_detail || ""), map)),
+    panel(e.headline || "Einzelwertrisiko", el("p", { class: "muted small" }, e.headline_detail || ""), map),
+    el("div", { class: "grid cols-3", style: "margin-top:16px" },
       panel("Überblick", el("div", { class: "head" }, e.chips.map(([label, value, level]) => el("span", { class: `badge ${level === "warning" ? "warn" : level === "blocker" ? "bad" : "ok"}` }, `${label}: ${value}`))),
-        kv(e.summary), e.notes.length ? e.notes.map((n) => el("div", { class: "note warning" }, n)) : null)),
-    el("div", { class: "grid", style: "margin-top:16px" },
-      panel("Unternehmen (direkt + über ETFs)", holder),
-      panel("ETFs", vmTable({ headers: e.headers.etfs, rows: e.etf_rows, levels: e.etf_levels }, { numeric: [1] }))));
+        kv(e.summary), e.notes.length ? e.notes.map((n) => el("div", { class: "note warning" }, n)) : null),
+      el("div", { class: "span-2" }, panel("Unternehmen (direkt + über ETFs)", holder))),
+    el("div", { class: "grid", style: "margin-top:16px" }, panel("ETFs", vmTable({ headers: e.headers.etfs, rows: e.etf_rows, levels: e.etf_levels }, { numeric: [1] }))));
   drawCompanies();
   echart(map, {
     tooltip: { ...tooltip, formatter: (p) => (p.data && p.data.tip ? p.data.tip.replace(/\n/g, "<br>") : p.name) },

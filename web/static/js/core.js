@@ -144,15 +144,17 @@ document.addEventListener("mousemove", (event) => {
 
 // -- charts ----------------------------------------------------------------------------------------------------------------------------
 export const COLORS = ["#2ee88a", "#19c9a3", "#6cb6ff", "#b48cff", "#f2c14e", "#ff8f5c", "#ff5f6d", "#4dd4e8", "#9fe870", "#e66bd1", "#8ba198", "#5c7cff"];
-const charts = new Set();
+// Every chart follows the size of its box (window, collapsed navigation, tab switch) through a ResizeObserver.
+const charts = new Map();
 export function echart(node, option) {
   const chart = echarts.init(node, null, { renderer: "canvas" });
   chart.setOption({ backgroundColor: "transparent", textStyle: { color: "#e3efe9", fontFamily: "Segoe UI, system-ui, sans-serif" }, color: COLORS, ...option });
-  charts.add(chart);
+  const observer = new ResizeObserver(() => { if (node.isConnected && node.clientWidth) chart.resize(); });
+  observer.observe(node);
+  charts.set(chart, observer);
   return chart;
 }
 export function disposeCharts() {
-  for (const chart of charts) chart.dispose();
+  for (const [chart, observer] of charts) { observer.disconnect(); chart.dispose(); }
   charts.clear();
 }
-window.addEventListener("resize", () => { for (const chart of charts) chart.resize(); });

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+- Web header: Ollama status next to the database status (a real check through `/api/status` with a short timeout; a failure only affects chat and analyses) and a gear button that opens the settings.
+- Web navigation can be collapsed to icons with ☰; the state is kept per browser in localStorage.
+- Web layout uses the full window width; the sector treemap and the effective-exposure map span the content width and are much taller; charts resize with their box (window, navigation, tab switch).
+
 ## [1.0.0] - 2026-10-24
 
 First stable release. Production has run this state since 24.10.2026.

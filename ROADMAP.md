@@ -17,11 +17,11 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
 | M3 Qt-Funktionsparität | erledigt | alle Qt-Workflows im Browser (Liste unten); Qt bleibt bis M6 verfügbar |
 | M4 Reasoning-Orchestrierung | erledigt | LangGraph-Workflow `viper_reasoning.py`, Speicherung `analysis_store.py` |
 | M5 Intelligence-Cockpit | erledigt | Seite Intelligence mit Thesen, Analysen, Prozessen, Ereignissen und Analysedetail |
-| M3a Integrierte Aufgabenverwaltung | erledigt (Code) | APScheduler im Web-Prozess, Jobs in SQLite; Übernahme in der Produktion offen |
+| M3a Integrierte Aufgabenverwaltung | erledigt (Code) | APScheduler im Web-Prozess, Jobs in SQLite; in der Produktion seit 24.10.2026 alle sieben Jobs übernommen |
 | M3b Depotwert-Graph mit vollständiger Historie | erledigt (Code) | Zeiträume bis MAX, zeitgewichtete Rendite; EZB-Backfill in der Produktion offen |
 | M3c ETF-Datentask: Aktualität und Zeitzone | erledigt | Ursachen: UTC-verankerte Windows-Trigger, Checkout-Instanz ohne private ETF-Dateien |
 | M3d Windows-Tasks per CLI verwalten | erledigt (Code) | `viper-ai tasks list/deploy/edit/delete` über `Manage-TradingTasks.ps1` |
-| M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist Standardstart, Qt entfernt; Umstellung der Produktion offen |
+| M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist Standardstart, Qt entfernt; Produktion seit 24.10.2026 umgestellt |
 
 ## Leitlinien
 
@@ -159,7 +159,7 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
   Rücksprung bei erfundenen Belegen, Wiederaufnahme nach Modellfehler, Prüfung des Vorschlags, Neubewertung, Lauf über das Web mit Fake-Ollama.
 - Auf einer Kopie der Produktionsdatenbank mit einem geskripteten Modell geprüft (Abbruch bei `decide` und Wiederaufnahme ab dem
   Checkpoint). Ein Lauf mit dem echten lokalen Modell steht aus: Ollama war während der Umsetzung nicht erreichbar.
-- Offen für den Betrieb: einmalig `viper-ai run Migrate-TradingAnalysisCases.py --write` auf der Produktionsdatenbank (additiv; ohne die
+- Betrieb: `viper-ai run Migrate-TradingAnalysisCases.py --write` lief am 24.10.2026 auf der Produktionsdatenbank (additiv; ohne die
   Tabellen schreibt die Analyse nichts und die Seite nennt den Befehl).
 
 ### M5 – Intelligence-Cockpit (P1; nach M4)
@@ -311,8 +311,9 @@ Scheduler für zeit- und ereignisgesteuerte Aufgaben.
 - Datenpfade, Start/Stopp und Logs geprüft: Datenbank und private Dateien über den Runtime-Root, Einstellungen in derselben Datei wie
   bisher, Scheduler im Web-Prozess (Autostart bei Anmeldung empfohlen), Doppelstart verhindert.
 - Prüfung: vollständige Suiten vor dem Entfernen der dauerhaften Testsuite grün; Installation aus dem Wheel in frischer venv geprüft (Standardstart liefert das Web auf der Root-Datenbank, Doppelstart nutzt die laufende Instanz, Upgrade lässt den Runtime-Root unverändert).
-- **Offen (deine Freigabe):** Umstellung der Produktion nach [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion):
-  Version installieren, zwei additive Migrationen, Autostart, Übernahme der Jobs; bis dahin läuft die Produktion unverändert mit v0.6.0.
+- **Produktion umgestellt am 24.10.2026** nach [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion):
+  Version installiert, zwei additive Migrationen, Autostart, alle sieben Jobs nach einem erfolgreichen Lauf übernommen (Windows-Tasks
+  deaktiviert, nicht gelöscht). Vorher gesichert: Datenbank und `sector_map_local.json` im Ordner `backup` des Roots.
 
 ## Empfohlene Arbeitsfolge
 

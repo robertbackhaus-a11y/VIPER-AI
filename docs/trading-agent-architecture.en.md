@@ -471,7 +471,7 @@ Production runs with the root `C:\tools\Viper-AI` (user environment variable `VI
 
 ### 6.1 Installation and update with pip
 
-Since 22.10.2026 **production runs the pip installation** of v0.6.0: root `C:\tools\Viper-AI`, environment `C:\tools\Viper-AI\.venv` with the extra `gui`; the scheduled tasks, the MCP front end, the GUI settings and the desktop shortcut use it. The **former legacy installation** (deploy into `C:\tools\trading\app`, `mcp`, `gui`, environments `.venv` / `.venv-gui`) stays unchanged for a rollback and runs nothing.
+Since 22.10.2026 **production runs the pip installation**, since 24.10.2026 the web version: root `C:\tools\Viper-AI`, environment `C:\tools\Viper-AI\.venv` with the extra `web`; VIPER starts at logon (`viper-ai-gui --no-browser` in the startup folder) and runs the scheduled jobs itself, the seven Windows tasks are disabled; the MCP front end and the desktop shortcut use the same environment. The **former legacy installation** (deploy into `C:\tools\trading\app`, `mcp`, `gui`, environments `.venv` / `.venv-gui`) stays unchanged for a rollback and runs nothing.
 
 | Step | Command |
 |---|---|

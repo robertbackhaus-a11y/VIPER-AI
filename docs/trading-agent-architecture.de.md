@@ -471,7 +471,7 @@ Produktiv läuft der Root `C:\tools\Viper-AI` (Benutzer-Umgebungsvariable `VIPER
 
 ### 6.1 Installation und Update mit pip
 
-Seit 22.10.2026 **läuft produktiv die pip-Installation** von v0.6.0: Root `C:\tools\Viper-AI`, Umgebung `C:\tools\Viper-AI\.venv` mit dem Extra `gui`; die geplanten Tasks, das MCP-Frontend, die GUI-Einstellungen und die Desktop-Verknüpfung nutzen sie. Die **frühere Legacy-Installation** (Deploy nach `C:\tools\trading\app`, `mcp`, `gui`, Umgebungen `.venv` / `.venv-gui`) bleibt für einen Rollback unverändert und führt nichts mehr aus.
+Seit 22.10.2026 **läuft produktiv die pip-Installation**, seit 24.10.2026 die Web-Version: Root `C:\tools\Viper-AI`, Umgebung `C:\tools\Viper-AI\.venv` mit dem Extra `web`; VIPER startet bei der Anmeldung (`viper-ai-gui --no-browser` im Autostart-Ordner) und führt die geplanten Jobs selbst aus, die sieben Windows-Tasks sind deaktiviert; MCP-Frontend und Desktop-Verknüpfung nutzen dieselbe Umgebung. Die **frühere Legacy-Installation** (Deploy nach `C:\tools\trading\app`, `mcp`, `gui`, Umgebungen `.venv` / `.venv-gui`) bleibt für einen Rollback unverändert und führt nichts mehr aus.
 
 | Schritt | Befehl |
 |---|---|

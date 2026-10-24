@@ -25,8 +25,8 @@ VIPER-AI analyses and simulates only: **it never places an order.**
 
 ## Release and development state
 
-- **Latest release: v0.6.0** (package version `0.6.0`). Production runs this release, still with the Qt desktop GUI and the
-  Windows scheduled tasks.
+- **Latest release: v0.6.0** (package version `0.6.0`). Since 24.10.2026 production runs the web version (commit
+  `045f5f2`, package version still `0.6.0`), and the integrated task scheduler runs the scheduled jobs.
 - The repository history was started fresh on 24.10.2026 with the web version; the tags and releases up to v0.6.0 are no longer on
   GitHub. The v0.6.0 wheel is kept locally as the way back.
 - Changes after the release are listed under `[Unreleased]` in the [changelog](CHANGELOG.md); they become part of a release only with the
@@ -42,8 +42,8 @@ both are written in German. State of the development branch:
   MAX and a time-weighted return; M3c the time zone of the schedules.
 - Done: M6, the cutover in the code: the web front end is the standard start (`viper-ai-gui` opens it, so the desktop shortcut keeps its
   target) and the Qt desktop GUI is removed.
-- Open for production: install the next version, run the two additive migrations, start VIPER at logon and take the scheduled jobs over
-  from Windows one by one (see [web.en.md](docs/web.en.md#6-start-settings-and-production)).
+- Production switched on 24.10.2026: web version installed, both additive migrations run, VIPER starts at logon, all seven jobs taken
+  over from Windows (the Windows tasks are disabled, not deleted; see [web.en.md](docs/web.en.md#6-start-settings-and-production)).
 
 ## Installation
 

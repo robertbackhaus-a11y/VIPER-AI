@@ -1,12 +1,12 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ollama client of the GUI (standard library only: ``http.client`` and ``json``; no Qt, no extra package).
+"""Ollama client of the web chat (standard library only: ``http.client`` and ``json``; no Qt, no extra package).
 
 What it does: reachability, model list, and ``/api/chat`` as a *stream* of typed chunks (thinking text, answer text, tool calls, final
 statistics).  A :class:`CancelToken` closes the HTTP connection from another thread, which stops exactly this request.
 
-What it never does: start, stop, load or unload Ollama or a model (the GUI shares one Ollama instance with other clients), and it never
+What it never does: start, stop, load or unload Ollama or a model (VIPER shares one Ollama instance with other clients), and it never
 sets a context size or any other model option (the instance's own settings stay in effect).
 """
 

@@ -39,7 +39,7 @@ Fassade mcp-tools/trading_sqlite.py: Klasse Tools (27 Methoden; Policy tool_poli
 ```
 
 `<root>` ist `VIPER_TRADING_ROOT` (Produktion `C:\tools\Viper-AI`). Paket `viper_ai` (pip): `tools/trading` → `viper_ai.app`,
-`mcp-tools` → `viper_ai.mcp`, `gui` → `viper_ai.gui`.
+`mcp-tools` → `viper_ai.mcp`, `gui` → `viper_ai.gui`. (Stand v0.6.0; heute ist Qt entfernt und `gui/` aufgelöst, siehe Abschnitt 4.1 und 4.3.)
 
 ### 2.2 Kopplung von Oberfläche und Fachlogik
 
@@ -117,8 +117,10 @@ Das Webfrontend berechnet weder Portfolio-Performance noch Investmententscheidun
 je Seitengruppe); Dashboard, Portfolio, Positionsdetail und Transaktionen. Tabellen und Texte des Desktop-Dashboards kommen als JSON der
 bestehenden View-Modelle (`web/views.py`), damit Wortlaut und Reason-Code-Texte gleich bleiben.
 
-**Umsetzungsstand (M6):** Das Web ist der Standardstart (`viper-ai-gui`); Qt ist entfernt, das Paket `gui` enthält nur noch die Qt-freien
-View-Modelle und Dienste.
+**Umsetzungsstand (M6, vervollständigt 24.10.2026):** Das Web ist die einzige Oberfläche; Standardstart `viper-ai-start` (ohne Konsolenfenster)
+bzw. `viper-ai start`, mit Konsole `viper-ai-web`. Qt ist vollständig entfernt: kein PySide, kein Extra `gui`, kein `viper-ai-gui`, kein Ordner
+`gui/`. Die View-Modelle und Dienste, die das Web nutzt, liegen in `viper_ai/shared` (`viewmodels`, `services`); die Einstellungen im
+Einstellungsordner aus `runtime_paths` (Windows `%LOCALAPPDATA%\VIPER-AI`, Linux `~/.config/viper-ai`).
 
 **Umsetzungsstand (M3):** alle Seiten der Qt-GUI (Planner, Watchlist mit Aktionen, Sektoren, Tasks, Import, Chat, Einstellungen).
 `web/pages.py` bildet die Handler von `gui/app.py` eins zu eins nach (gleiches Tool, gleiche Argumente, gleiche Reihenfolge der
@@ -146,16 +148,29 @@ Bestehende Funktionen für Marktdaten, Währungen, Depot-/Transaktionsdaten, Bew
 Der bestehende Scheduler bleibt für deterministische, zeitgesteuerte Aufgaben zuständig (z. B. Datenaktualisierung). Nicht jede Kursaktualisierung erfordert ein LLM.
 
 **Umsetzungsstand (Korrektur von M3a, 24.10.2026):** Der in M3a eingeführte integrierte Scheduler (APScheduler im Web-Prozess, Jobs und
-Läufe in `scheduled_job` / `job_run`, Übernahme der Windows-Tasks) wurde verworfen und entfernt. Für sieben lokale Jobs lohnt keine zweite
-Scheduler-Wahrheit in SQLite neben der Windows-Aufgabenplanung. Die Windows-Aufgabenplanung bleibt bewusst der einzige Scheduler: sieben
-Tasks (`pythonw.exe Run-TradingTask.py <Log> <Skript> [Argumente]`, `StartWhenAvailable`, `MultipleInstances = IgnoreNew`, Startzeiten als
-Ortszeit ohne UTC-Versatz, DST-fest seit M3c), verwaltet mit `viper-ai tasks list|deploy|edit|delete` über `scheduler/Manage-TradingTasks.ps1`.
-Das Web ist nur die Oberfläche dafür (Seite Aufgaben über `gui/services/task_service.py`: Zustand, letzter Lauf, Log, „Jetzt ausführen“ =
-`Start-ScheduledTask` genau dieses Tasks) und startet nie selbst einen Job, auch nicht beim Start. LangGraph bleibt den KI-Analysen vorbehalten.
+Läufe in `scheduled_job` / `job_run`, Übernahme der Windows-Tasks) ist verworfen und entfernt; ebenso `scheduler/Manage-TradingTasks.ps1`,
+das die sieben Tasks selbst festschrieb. Es gibt genau eine Task-Wahrheit, und die liegt in VIPER:
 
-**Runtime-Root:** Eine Quelle für alle Startwege: `tools/trading/runtime_paths.py` (Standard `C:\tools\Viper-AI`, Override
-`VIPER_TRADING_ROOT`). Web-Einstellungen, MCP-Server (`server.py`, `viper-ai-mcp`, Valve der Fassade), Tasks und Skripte leiten Root und
-Datenbank daraus ab; ausdrückliche Overrides (`--db`, `TRADING_DB_PATH`, gespeicherte Einstellungen) haben Vorrang.
+```
+viper_ai/tasks/definitions.py  (sieben Tasks: Name, Skript, Argumente, Zeitplan, aktiv, Zeitlimit, bei Anmeldung)
+  + <root>/scheduler/tasks.json (Änderungen dieser Installation)
+        │  viper_ai/tasks/manager.py  (deploy, edit, delete, restore, run, status – für CLI und Web)
+        ├──> Windows-Aufgabenplanung   viper_ai/tasks/windows.py  (Task-XML aus der Definition, Register-ScheduledTask)
+        └──> systemd-Benutzer-Timer    viper_ai/tasks/linux.py    (viper-<task>.service + .timer)
+```
+
+Die Betriebssystem-Scheduler sind nur Deployment-Ziele: Sie führen die Tasks aus (VIPER hat keinen eigenen Scheduler-Prozess und startet
+nie selbst einen Job), halten aber keine eigene Wahrheit. `deploy` ist idempotent und überträgt Aktion, Pfade, Zeitplan, Einstellungen und
+den Aktiviert-Zustand; eine Änderung direkt im Scheduler wird als Abweichung angezeigt und beim nächsten `deploy` überschrieben. Die Adapter
+enthalten keine Fachlogik, nur die Übersetzung in das jeweilige Format (lokale Ortszeit ohne UTC-Versatz bzw. `OnCalendar` in der lokalen
+Zeitzone, Nachholen verpasster Läufe, kein zweiter gleichzeitiger Lauf, Zeitlimit). CLI (`viper-ai tasks list|status|deploy|edit|delete|restore|run`)
+und Web-Seite Aufgaben arbeiten gegen dieselbe Verwaltung; im Web gibt es keine PowerShell-Logik mehr. LangGraph bleibt den KI-Analysen vorbehalten.
+
+**Runtime-Root:** Eine Quelle für alle Startwege und Betriebssysteme: `tools/trading/runtime_paths.py` (Standard Windows `C:\tools\Viper-AI`,
+Linux `$XDG_DATA_HOME/viper-ai` bzw. `~/.local/share/viper-ai`; Override `VIPER_TRADING_ROOT`). Web-Einstellungen, MCP-Server (`server.py`,
+`viper-ai-mcp`, Valve der Fassade), Tasks und Skripte leiten Root, Datenbank, Logs, Task-Zustand und Einstellungsordner daraus ab;
+ausdrückliche Overrides (`--db`, `TRADING_DB_PATH`, gespeicherte Einstellungen) haben Vorrang. Kein anderes Modul enthält einen
+Windows-Pfad (`viper_ai/runtime.py` findet nur die Code-Ordner der Installation).
 
 ### 4.4 Reasoning-Orchestrierung – eigenständig für VIPER
 
@@ -210,7 +225,7 @@ observe -> assess_data --(unzureichend)--> finalize
 - Deterministisch (Engine, nur lesend): Snapshot (`analysis_engine`), Engine-Entscheidung und Planner (`trading_orchestrator`), Bestand und
   Gewicht (`portfolio_history`), Sektor und Guard (`sector_overview`), Meldungen und Ereignisse. Daraus entsteht ein Belegkatalog
   (`metric:*`, `fundamental:*`, `engine:action`, `portfolio:*`, `news:<id>`, `event:<id>`).
-- LLM (bestehende Ollama-Anbindung `gui/services/ollama_client.py`, JSON-Antworten): Meldungslage, These und Gegenthese mit Annahmen,
+- LLM (bestehende Ollama-Anbindung `viper_ai/shared/services/ollama_client.py`, JSON-Antworten): Meldungslage, These und Gegenthese mit Annahmen,
   Unsicherheit und Datenlücken, begründeter Vorschlag. Jede Aussage zitiert Beleg-IDs; unbekannte IDs schickt `evidence_check` einmal zurück.
 - `review` prüft deterministisch: zulässige Aktion für den Bestand (gehalten: HOLD/ADD/TRIM/SELL, sonst WATCH/BUY/NO_ACTION), Abweichung
   von der Engine-Aktion, Konfidenz bei eingeschränkter Datenlage höchstens mittel, Gültigkeit höchstens 90 Tage. Ein Vorschlag ist nie eine Order.

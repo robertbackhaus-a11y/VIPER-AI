@@ -1440,7 +1440,7 @@ class Tools:
     @staticmethod
     def _runtime_tools_directory() -> Path:
         """The folder of the trading helpers that belong to THIS server: ``app`` next to this tool's
-        folder (the deployed ``C:\\tools\\trading\\mcp`` and the pip installation ``viper_ai/mcp``),
+        folder (the legacy deployed copy ``<root>\\mcp`` and the pip installation ``viper_ai/mcp``),
         ``tools/trading`` in a repository checkout; only otherwise ``<trading root>\\app``
         (``VIPER_TRADING_ROOT``; a copy of this file without its helpers has no default root).  A checkout
         or a pip installation never silently runs the helpers of another (older) deployed copy."""

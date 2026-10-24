@@ -2,7 +2,7 @@
 
 Deutsche Version: [web.de.md](web.de.md)
 
-The web front end is the interface of VIPER-AI in the local browser. It replaced the former Qt desktop GUI (M6); the plan and its state are in the roadmap of the repository. It holds no trading logic: every figure comes from the existing engine.
+The web front end is the interface of VIPER-AI in the local browser. It is the only user interface (the former Qt desktop GUI is removed completely); the plan and its state are in the roadmap of the repository. It holds no trading logic: every figure comes from the existing engine.
 
 ## 1. Architecture
 
@@ -28,11 +28,13 @@ The web front end needs the extra `web` (package `fastapi`; `uvicorn` comes with
 <venv>\Scripts\python.exe -m pip install "VIPER-AI[web] @ <source>"
 viper-ai-web
 viper-ai-web --port 8766 --no-browser
+viper-ai start
 ```
 
-- The web never starts a job on its own, not at a start or restart either: the scheduled jobs are the seven Windows tasks (section 6). `--no-scheduler` is still accepted but has no effect any more.
-- Without `--db` the `trading_db_path` of the settings file (section 6) applies, otherwise `<root>\data\trading.db` of `VIPER_TRADING_ROOT`.
-- In the repository `python -m web` starts the same.
+- `viper-ai-web` runs with a console; `viper-ai start` and `viper-ai-start` (no console window, for the shortcut and the autostart) start the same server in the background and open the browser. If VIPER already runs, only the browser is opened.
+- The web never starts a job on its own, not at a start or restart either (section 7). `--no-scheduler` is still accepted but has no effect.
+- Without `--db` the `trading_db_path` of the settings file (section 6) applies, otherwise `<root>\data\trading.db` from `runtime_paths`.
+- In the repository `python -m web` starts the same; in the installation also `python -m viper_ai.web`.
 
 ## 3. API
 
@@ -44,9 +46,9 @@ viper-ai-web --port 8766 --no-browser
 | `GET /api/transactions` | stored transactions, newest first (`security_id`, `limit`) | `portfolio_history.transactions` |
 | `GET /api/securities/{id}/prices` | daily bars of one security in its trading currency | `portfolio_history.price_history` |
 | `GET /api/views/dashboard` | planner and engine block of the desktop dashboard (the same texts and tables) | `run_trading_orchestrator`, `database_status` |
-| `GET /api/views/planner`, `/api/views/watchlist`, `/api/views/sectors`, `/api/views/tasks` | tables and texts of the desktop pages planner, watchlist, sectors (with single-name exposure) and tasks | view models of `gui/viewmodels` |
+| `GET /api/views/planner`, `/api/views/watchlist`, `/api/views/sectors`, `/api/views/tasks` | tables and texts of the pages Planner, Watchlist, Sektoren (with the single-name exposure) and Aufgaben | view models of `viper_ai/shared/viewmodels` |
 | `POST /api/watchlist/add`, `/api/watchlist/{id}/remove`, `/api/watchlist/{id}/edit`, `/api/onboarding` | watchlist actions and adding a new security (check, then create) | `add_watchlist_candidate`, `remove_watchlist_candidate`, `set_security_strategy`, `set_watchlist_priority`, `set_security_sector`, `onboard_security` |
-| `POST /api/tasks/{name}/run`, `GET /api/tasks/{name}/log` | start a scheduled task now, read the end of its log | Windows Task Scheduler |
+| `POST /api/tasks/deploy`, `/api/tasks/{name}/edit` (`times`, `day`, `enabled`), `/delete`, `/restore`, `/run`; `GET /api/tasks/{name}/log` | deploy the definitions to the scheduler, change a task, enable/disable, delete, restore, run now, read the end of the log | `viper_ai.tasks` (section 7) |
 | `POST /api/import/upload`, `/api/import/check`, `/api/import/run` | store an export file, check it, import with the token of that check | `check_transaction_import`, `import_transactions` |
 | `POST /api/chat` | question to the local model, answer as Server-Sent Events; `/api/chat/stop`, `/api/chat/reset` | Ollama, READ tools |
 | `GET /api/diagnostics`, `GET` and `POST /api/settings` | paths, status, tool classification; settings | settings file |
@@ -78,7 +80,7 @@ The OpenAPI description is at `/api/docs`.
 | Planner / Aktionen | engine actions per position, planned and deferred entries, entry candidates with sector and correlation risk |
 | Watchlist | table with filters and sorting; strategy, priority and sector are chosen in the table, the apply button saves (strategy, then priority, then sector; a failure stops the sequence); add with a check, remove after a confirmation; "Neues Wertpapier aufnehmen" (check, create only after a clean check of the unchanged form) |
 | Sektoren | treemap and tables of the sectors, ETF look-through; tab "Einzelwertrisiko" with its own treemap, company and ETF table |
-| Aufgaben | the seven Windows tasks with state (including "disabled"), last run and result, next run, data stand, run now after a confirmation (starts exactly the existing Windows task, followed until its end), end of the log, ETF data stand; schedule, enabling and creating through `viper-ai tasks` |
+| Aufgaben | the seven VIPER tasks: schedule (time(s) and day) and the enabled switch of the VIPER definition, state in the scheduler with last run and result, next run, data stand, difference of the scheduler from the definition (⚠), run now after a confirmation (through the scheduler, followed until its end), end of the log, delete and restore, "Deployen"; below, the ETF data stand |
 | Import | choose the file, check (writes nothing), decide open points (every decision needs a new check), import with the token of the check after a confirmation |
 | Chat | questions to the local model with the READ tools of the MCP profile `read`; answer, thinking, tool calls and errors kept apart; stop, new chat |
 | Intelligence | start an analysis; active theses with proposal, engine action, confidence, data stand, validity and reasons for a re-evaluation; analyses and processes (continue after an interruption); latest events |
@@ -87,22 +89,62 @@ The OpenAPI description is at `/api/docs`.
 
 - Data stand, currency and calculation basis are named in the head of every page; the tooltip "Berechnungsbasis" gives the rules of section 4.
 - The periods and their figures are computed by the engine (section 4); the page only cuts the daily values for the chart and shows gaps as a break in the line.
-- Every page calls the same tool with the same arguments and the same view model as the former desktop GUI; wording, reason code texts, checks and the order of the write steps are the same.
-- An import file is stored in `%LOCALAPPDATA%\TradingAgentGui\web-import` (the tools only read a local path); it is never part of the package or of the runtime root.
+- Every page calls the same tool with the same arguments and the same view model as the desktop GUI did; wording, reason code texts, checks and the order of the write steps are the same.
+- An import file is stored in the settings folder under `web-import` (the tools only read a local path); it is never part of the package or of the runtime root.
 - The chat builds the MCP server in the profile `read` in its own process (without starting it) and gives the model its tools: the same names, descriptions, schemas, compact answers and the same limit of 40,000 characters as any MCP client.
 - "Neu berechnen" makes the orchestrator compute again at once instead of showing the result of up to 60 seconds ago.
 
 ## 6. Start, settings and production
 
-- `viper-ai-gui` is the standard start (no console window): it starts the server if it does not run yet and opens the browser; if VIPER already runs, it only opens the browser. The desktop shortcut that used to start `viper-ai-gui.exe` therefore keeps its target. `viper-ai-web` does the same with a console.
-- Without a console the server writes its output to `%LOCALAPPDATA%\TradingAgentGui\web.log`. The settings stay in `%LOCALAPPDATA%\TradingAgentGui\settings.json` (Ollama URL and model, database, log folder of the tasks); the settings page changes them.
-- The Windows Task Scheduler is the only scheduler. The jobs run by their Windows triggers (local time, DST-safe, `StartWhenAvailable`, `MultipleInstances = IgnoreNew`), whether VIPER runs or not; they are created, changed, enabled and deleted with `viper-ai tasks list|deploy|edit|delete`. The autostart (`viper-ai-gui --no-browser` in the folder `shell:startup`) only starts the user interface.
-- The integrated scheduler introduced in M3a (APScheduler) was removed again. The tables `scheduled_job` and `job_run` of a database it ran on stay untouched and are no longer read.
+- `viper-ai-start` is the standard start without a console window (target of the desktop shortcut and of the autostart `viper-ai-start --no-browser` in the folder `shell:startup`); `viper-ai start` does the same from a console, `viper-ai-web` runs with a console. The former `viper-ai-gui` no longer exists.
+- Without a console the server writes its output to `web.log` in the settings folder. The settings folder comes from `runtime_paths`: Windows `%LOCALAPPDATA%\VIPER-AI`, Linux `$XDG_CONFIG_HOME/viper-ai` (`~/.config/viper-ai`). It holds `settings.json` (Ollama URL and model, database, refresh, thinking); the settings page changes them. As long as there is no `settings.json` there, the one of the former folder `%LOCALAPPDATA%\TradingAgentGui` is read (never changed); the first save writes to the new folder.
+- The log folder of the tasks and the task definitions are in the runtime root (`<root>\logs`, `<root>\scheduler\tasks.json`); they are no setting any more.
 
-Switching production over (each step can be undone, runtime data stays untouched):
+Switching production over to this version (each step can be undone, runtime data stays untouched):
 
-1. Install the new version with the extra `web` (`[gui]` is an alias and installs the same).
-2. `viper-ai run Migrate-TradingAnalysisCases.py --write` (additive table; check without `--write` first).
-3. Set up the autostart as above and start VIPER.
-4. Deploy and enable the Windows tasks: `viper-ai tasks deploy`, then `viper-ai tasks edit <task> --enable` for each of the seven tasks (`deploy` keeps the enabled state; without this step no job runs when they were disabled for the takeover by the integrated scheduler). Check with `viper-ai tasks list`.
-5. Way back: install the locally kept v0.6.0 wheel again (`pip install "<path>\viper_ai-0.6.0-py3-none-any.whl[gui]"`; the tag is no longer on GitHub) and enable the Windows tasks again with `viper-ai tasks edit <task> --enable`.
+1. Install the new version with the extra `web` (from a checkout delete the folders `build` and `*.egg-info` first, otherwise old files end up in the package). The extra `[gui]` no longer exists.
+2. Switch the shortcuts: autostart (`shell:startup\VIPER-AI.lnk`) and desktop shortcut to `<venv>\Scripts\viper-ai-start.exe` (the autostart with `--no-browser`); `viper-ai-gui.exe` is removed by the upgrade.
+3. `viper-ai tasks deploy`: deploys the seven definitions (action, schedule, settings, **enabled state**) to the Windows Task Scheduler. Tasks that were disabled (for example after the takeover by the integrated scheduler, which is removed now) are enabled again. Check with `viper-ai tasks list`.
+4. Way back: install the previous version again; the tasks stay as they are (name, action and schedule did not change).
+
+## 7. Tasks (scheduled tasks)
+
+VIPER holds the definitions of the seven tasks itself; the scheduler of the operating system is only where they are deployed to.
+
+```
+viper_ai/tasks/definitions.py   the seven tasks (name, script, arguments, schedule, enabled, time limit, at login)
+  + <root>/scheduler/tasks.json  changes of this installation (schedule, enabled, deleted)
+          |
+          +--> Windows: Task Scheduler      (viper_ai/tasks/windows.py, task XML, Register-ScheduledTask)
+          +--> Linux:   systemd user timers (viper_ai/tasks/linux.py, viper-<task>.service + .timer)
+```
+
+| Task | Script and arguments | Schedule (local time) | Time limit | At login |
+|---|---|---|---|---|
+| `Trading-MarketData-Backfill` | `Backfill-TradingMarketData.py --write` | daily 17:15 | 72 h | yes |
+| `Trading-FXRates-Backfill` | `Backfill-TradingFXRatesECB.py --write --quote-currency USD,GBP,AUD,KRW` | daily 17:20 | 72 h | yes |
+| `Trading-EventsNews-Backfill` | `Backfill-TradingEventsNews.py --write` | daily 17:25 | 72 h | yes |
+| `Trading-Fundamentals-SEC` | `Backfill-TradingFundamentalsSEC.py` | Sun 10:00 | 72 h | yes |
+| `Trading-Candidate-Discovery` | `Discover-TradingCandidates.py` | daily 17:35 | 2 h | no |
+| `Trading-Market-Intelligence` | `Collect-TradingMarketIntelligence.py` | daily 08:15 and 17:45 | 2 h | no |
+| `Trading-ETF-Refresh` | `Refresh-TradingEtfData.py --write` | Sun 11:00 | 1 h | no |
+
+- Every run is `Run-TradingTask.py <root>/logs/<log> <script> [arguments]` with the Python of this installation (Windows `pythonw.exe`, no console window); the launcher appends the output to the log and hands on the exit code.
+- `viper-ai tasks deploy` (or "Deployen" on the Aufgaben page) creates missing tasks, updates differing ones (action, paths, schedule, settings, enabled) and removes deleted ones; a second run changes nothing. If a task is changed outside VIPER, the page shows the difference, and the next deploy puts the VIPER definition back.
+- `viper-ai tasks edit <task> --at HH:MM[,HH:MM] --day daily|monday..sunday --enable|--disable` (or the fields of the page) changes the VIPER definition and deploys the task at once. `delete <task>` marks it deleted in VIPER and removes it from the scheduler; `restore <task>` brings back the built-in definition. `run <task>` starts it now through the scheduler (never a running, disabled or undeployed one). `list` and `status` show definition, state, runs and differences.
+- Only the seven VIPER tasks are ever touched; another name is refused, systemd files without the VIPER marker are never overwritten or deleted.
+- Windows: start times as local time without a UTC offset (`2026-01-01T17:15:00`), so the wall-clock time stays across summer and winter time; `StartWhenAvailable` catches up missed runs, `MultipleInstancesPolicy IgnoreNew` prevents a second run at the same time; the task runs as the logged-on user without a stored password. `deploy` refuses when the user environment variable `VIPER_TRADING_ROOT` (or the default) is not the root deployed for.
+- Linux: `OnCalendar=*-*-* 17:15:00` or `Sun *-*-* 11:00:00` in the local time zone (safe across summer time), `Persistent=true` catches up missed runs, a running `oneshot` service is not started a second time, `TimeoutStartSec` is the time limit, `VIPER_TRADING_ROOT` is set in the service. "At login" = the service hangs on `default.target` of the user manager. For timers to run without a login: `loginctl enable-linger <user>` (optional).
+- VIPER has no scheduler process: the web server plans and starts nothing on its own. The integrated scheduler introduced in M3a (APScheduler) is removed; the tables `scheduled_job` and `job_run` of a database it ran on stay untouched and are not read.
+
+## 8. Views
+
+Taken with a demo database with fictional values (sample file `examples/trading-import-example.csv`, artificial prices); no real portfolio data.
+
+![Dashboard](images/web-dashboard.png)
+![Portfolio](images/web-portfolio.png)
+![Planner / Aktionen](images/web-planner.png)
+![Watchlist](images/web-watchlist.png)
+![Sektoren](images/web-sectors.png)
+![Intelligence](images/web-intelligence.png)
+![Aufgaben](images/web-tasks.png)

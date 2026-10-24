@@ -6,7 +6,7 @@
 Without ``--write`` this is a complete dry run: everything is downloaded and validated and the report shows what would change; no file is touched.  With ``--write`` each file is
 replaced atomically only after every refreshed entry passed the validation and the candidate file was read back through the real loaders; the previous file is kept as
 ``<file>.bak-refresh-<time>``.  A failing ETF keeps its stored entry; the holdings file and the look-through file are independent.  The exit code is 0 only when nothing failed (unchanged data and the manual SPXS sector allocation are no failure); 3 = partly refreshed, 2 = failed - so a scheduled run shows a
-provider, parser or validation problem as a failed run.  Scheduled weekly by Manage-TradingTasks.ps1 (Trading-ETF-Refresh); no retry here.
+provider, parser or validation problem as a failed run.  Scheduled weekly as the VIPER task ETF-Refresh (viper_ai.tasks); no retry here.
 """
 
 from __future__ import annotations

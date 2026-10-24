@@ -20,13 +20,11 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from . import tool_policy
 from .ollama_client import CANCELLED, CancelToken, OllamaClient, OllamaError
 
-if TYPE_CHECKING:  # the loop only reads attributes of the result; it must stay importable without Qt
-    from .mcp_client import McpResult
 
 MAX_ROUNDS = 6
 MAX_RESULT_CHARS = 40_000  # the same cap the MCP server applies to compact answers
@@ -202,7 +200,7 @@ def _error_text(kind: str, message: str) -> str:
 class ToolLoop:
     """Blocking; meant to run in a worker thread.  ``call_tool(name, arguments, token) -> McpResult`` is the only way to the MCP server."""
 
-    def __init__(self, client: OllamaClient, catalog: Mapping[str, Mapping[str, Any]], call_tool: Callable[[str, dict[str, Any], CancelToken], "McpResult"], model: str,
+    def __init__(self, client: OllamaClient, catalog: Mapping[str, Mapping[str, Any]], call_tool: Callable[[str, dict[str, Any], CancelToken], Any], model: str,
                  think: bool = False, system_prompt: str = SYSTEM_PROMPT, max_rounds: int = MAX_ROUNDS, max_result_chars: int = MAX_RESULT_CHARS,
                  max_total_chars: int = MAX_TOTAL_RESULT_CHARS) -> None:
         self.client, self.catalog, self.call_tool = client, catalog, call_tool

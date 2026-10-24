@@ -1,11 +1,11 @@
 // Copyright (C) 2026 Robert Backhaus
 // SPDX-License-Identifier: Apache-2.0
 // Einstellungen / Diagnose: paths, database and Ollama status, the tool classification (/api/diagnostics) and the settings the web uses
-// (/api/settings; the same settings file as the desktop GUI).
+// (/api/settings; settings.json in the settings folder of the installation).
 
 import { el, get, kv, panel, post } from "./core.js";
 
-const FIELDS = [["ollama_base_url", "Ollama-URL"], ["ollama_model", "Ollama-Modell"], ["trading_db_path", "Datenbank"], ["trading_logs_dir", "Log-Ordner der Tasks"],
+const FIELDS = [["ollama_base_url", "Ollama-URL"], ["ollama_model", "Ollama-Modell"], ["trading_db_path", "Datenbank"],
   ["refresh_interval_s", "Aktualisierung (Sekunden)"], ["think_enabled", "Thinking im Chat"]];
 
 export async function render(target) {

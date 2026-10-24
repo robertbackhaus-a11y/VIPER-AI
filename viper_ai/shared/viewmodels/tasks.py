@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any, Mapping, Optional
 
 from ..services import task_model as tm
-from ..services.task_service import TaskInfo, result_text, rhythm_text, trigger_line
+from ...tasks.status import TaskInfo, result_text, rhythm_text, trigger_line
 from .portfolio import DASH, fmt_time
 
 STATE_TEXT = {"ready": "bereit", "running": "läuft", "disabled": "deaktiviert", "queued": "wartet", "unknown": "unbekannt"}
@@ -47,6 +47,7 @@ class TaskRowVM:
     dependency_lines: list[str] = field(default_factory=list)
     last_error: str = ""
     status_line: str = ""  # the table cell: state, last run and its result
+    drift: str = ""  # where the deployed task differs from the VIPER definition
 
 
 def _short(value: Optional[datetime]) -> str:
@@ -105,7 +106,7 @@ def last_success(task: TaskInfo, fresh: Optional[tm.Freshness]) -> Optional[date
 
 def _error_text(task: TaskInfo) -> str:
     if task.last_result not in (None, *tm.NO_ERROR_RESULTS):
-        return f"Windows-Ergebnis {result_text(task.last_result)} beim Lauf vom {fmt_time(task.last_run)}"
+        return f"Ergebnis des Schedulers {result_text(task.last_result)} beim Lauf vom {fmt_time(task.last_run)}"
     return ""
 
 
@@ -122,13 +123,14 @@ def build_task_rows(tasks: list[TaskInfo], freshness: Optional[Mapping[str, Any]
         spec = tm.SPECS.get(task.name)
         title = spec.title if spec else task.name
         if not task.found:
-            rows.append(TaskRowVM(task.name, "nicht registriert", DASH, DASH, DASH, False, "Task ist nicht registriert", "blocker", title,
-                                  details=f"{task.name}: nicht im Windows Task Scheduler registriert.", status_line="nicht registriert"))
+            rows.append(TaskRowVM(task.name, "nicht deployt", DASH, DASH, DASH, False, "Task ist nicht deployt", "blocker", title,
+                                  details=f"{task.name}: im Scheduler des Betriebssystems nicht vorhanden; „Deployen“ legt ihn nach der VIPER-Definition an.",
+                                  status_line="nicht deployt"))
             continue
         fresh = stands.get(spec.produces) if spec else None
         state = STATE_TEXT.get(task.state.lower(), task.state or "unbekannt")
         level = "warning" if task.last_result not in (None, *tm.NO_ERROR_RESULTS) else ""
-        run_hint = "Task läuft bereits" if task.running else "Task ist deaktiviert" if task.disabled else "Aktion: startet den bestehenden Scheduled Task"
+        run_hint = "Task läuft bereits" if task.running else "Task ist deaktiviert" if task.disabled else "Aktion: startet den deployten Task über den Scheduler"
         dep_lines: list[str] = []
         warnings: list[str] = []
         for need in spec.needs if spec else ():
@@ -141,11 +143,12 @@ def build_task_rows(tasks: list[TaskInfo], freshness: Optional[Mapping[str, Any]
         if task.silent is False:  # the task still starts a console program: a window opens on every run
             level = level or "warning"
             warnings_exec = ("Der Task öffnet bei jedem Lauf ein Konsolenfenster (Aktion: " + ntpath.basename(task.action_execute) + "); "
-                             "einmalig Manage-TradingTasks.ps1 -Action UpdateAction ausführen.")
+                             "„Deployen“ stellt ihn auf pythonw.exe um.")
         else:
             warnings_exec = ""
         data_level = "" if fresh is None or fresh.level in (tm.OK, tm.UNKNOWN) else "warning" if fresh.level == tm.AGING else "blocker"
-        if data_level or any(w.startswith("Vorläufer") for w in warnings) or task.log_hint:
+        drift = ", ".join(task.drift)
+        if data_level or any(w.startswith("Vorläufer") for w in warnings) or task.log_hint or drift:
             level = level or "warning"
         success = last_success(task, fresh)
         success_text = _short(success)
@@ -164,6 +167,7 @@ def build_task_rows(tasks: list[TaskInfo], freshness: Optional[Mapping[str, Any]
         log_size = f" ({kb} KB, zuletzt geschrieben {fmt_time(task.log_modified)})" if task.log_modified and task.log_size is not None else ""
         details = "\n".join(filter(None, [
             f"{task.name} ({title})",
+            f"Weicht von der VIPER-Definition ab: {drift} (der nächste Deploy stellt die VIPER-Definition wieder her)" if drift else "",
             f"Rhythmus: {rhythm_text(task.triggers)}" if task.triggers else "Rhythmus: unbekannt (Auslöser nicht gelesen)",
             "Auslöser: " + "; ".join(trigger_line(t) for t in task.triggers) if task.triggers else "",
             "Nachholen verpasster Läufe (StartWhenAvailable): " + ("Ja" if task.start_when_available else "Nein" if task.start_when_available is False else "unbekannt"),
@@ -186,7 +190,7 @@ def build_task_rows(tasks: list[TaskInfo], freshness: Optional[Mapping[str, Any]
         ]))
         rows.append(TaskRowVM(task.name, state, fmt_time(task.last_run), _short(task.next_run), result_text(task.last_result), not task.running and not task.disabled, run_hint, level,
                               title, rhythm_text(task.triggers) if task.triggers else DASH, stand_text, data_level, success_text, duration_text(task, now), details,
-                              "\n".join(f"• {w}" for w in warnings), dep_lines, error, status_line))
+                              "\n".join(f"• {w}" for w in warnings), dep_lines, error, status_line, drift))
     return rows
 
 

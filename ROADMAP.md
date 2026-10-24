@@ -17,12 +17,13 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
 | M3 Qt-Funktionsparität | erledigt | alle Qt-Workflows im Browser (Liste unten); Qt bleibt bis M6 verfügbar |
 | M4 Reasoning-Orchestrierung | erledigt | LangGraph-Workflow `viper_reasoning.py`, Speicherung `analysis_store.py` |
 | M5 Intelligence-Cockpit | erledigt | Seite Intelligence mit Thesen, Analysen, Prozessen, Ereignissen und Analysedetail |
-| M3a Integrierte Aufgabenverwaltung | verworfen (24.10.2026) | APScheduler wieder entfernt; Windows-Aufgabenplanung bleibt einziger Scheduler, das Web verwaltet sie nur. Produktion läuft bis zum nächsten Update noch mit dem integrierten Scheduler |
+| M3a Integrierte Aufgabenverwaltung | verworfen (24.10.2026) | APScheduler wieder entfernt; ersetzt durch die Task-Verwaltung in VIPER mit OS-Backends (M7). Produktion läuft bis zum nächsten Update noch mit dem integrierten Scheduler |
 | M3b Depotwert-Graph mit vollständiger Historie | erledigt (Code) | Zeiträume bis MAX, zeitgewichtete Rendite; EZB-Backfill in der Produktion offen |
 | M3c ETF-Datentask: Aktualität und Zeitzone | erledigt | Ursachen: UTC-verankerte Windows-Trigger, Checkout-Instanz ohne private ETF-Dateien |
-| M3d Windows-Tasks per CLI verwalten | erledigt (Code) | `viper-ai tasks list/deploy/edit/delete` über `Manage-TradingTasks.ps1` |
-| M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist Standardstart, Qt entfernt; Produktion seit 24.10.2026 umgestellt |
-| Architektur-Bereinigung | erledigt (Code) | ein Runtime-Root aus `runtime_paths.py` (`C:\tools\Viper-AI`), Windows-Tasks als einziger Scheduler, Host/Origin-Prüfung für schreibende Web-Aufrufe |
+| M3d Windows-Tasks per CLI verwalten | überholt durch M7 | `viper-ai tasks` bleibt, `Manage-TradingTasks.ps1` ist entfernt |
+| M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist einzige Oberfläche, Qt und `gui/` vollständig entfernt (24.10.2026); Produktion seit 24.10.2026 auf der Web-Version |
+| Architektur-Bereinigung | erledigt (Code) | ein Runtime-Root aus `runtime_paths.py`, Host/Origin-Prüfung für schreibende Web-Aufrufe |
+| M7 Task-Wahrheit in VIPER, Windows und Linux | erledigt (Code), nicht produktiv | `viper_ai/tasks`: Definitionen in VIPER, Backends Windows-Aufgabenplanung und systemd-Benutzer-Timer; CLI und Web gegen dieselbe Verwaltung |
 
 ## Leitlinien
 
@@ -223,10 +224,11 @@ Begründung: Für sieben lokale Jobs braucht es keine zweite Scheduler-Wahrheit 
 nur zu Doppelläufen oder zu Jobs, die nicht laufen. Die Windows-Aufgabenplanung bleibt bewusst der einzige Scheduler (`viper-ai tasks`, M3d),
 das Web ist nur die Verwaltungsoberfläche (Seite Aufgaben: Zustand, Läufe, Log, „Jetzt ausführen“ startet genau den Windows-Task). Das Web
 startet keinen Job mehr beim Start, `StartWhenAvailable` und `IgnoreNew` der Tasks bleiben. Die Tabellen `scheduled_job` / `job_run` bleiben in
-der Produktionsdatenbank unverändert liegen und werden nicht mehr gelesen.
+der Produktionsdatenbank unverändert liegen und werden nicht mehr gelesen. Am selben Tag weitergeführt in M7: Die Taskdefinitionen gehören
+jetzt VIPER, die Windows-Aufgabenplanung ist nur noch ein Deployment-Ziel.
 - **Offen bis zum nächsten Produktionsupdate:** Die Produktion läuft noch mit dem integrierten Scheduler (Version `045f5f2`), die sieben
-  Windows-Tasks sind deaktiviert. Beim Update im selben Schritt `viper-ai tasks deploy` und für alle sieben `viper-ai tasks edit <task> --enable`,
-  sonst läuft danach kein Job ([docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion)).
+  Windows-Tasks sind deaktiviert. Das Update stellt mit `viper-ai tasks deploy` um (überträgt auch den Aktiviert-Zustand; M7,
+  [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion)).
 
 ### M3b – Depotwert-Graph mit vollständiger Historie (P1; nach M3a)
 
@@ -324,6 +326,34 @@ der Produktionsdatenbank unverändert liegen und werden nicht mehr gelesen.
 - **Produktion umgestellt am 24.10.2026** nach [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion):
   Version installiert, zwei additive Migrationen, Autostart, alle sieben Jobs nach einem erfolgreichen Lauf übernommen (Windows-Tasks
   deaktiviert, nicht gelöscht). Vorher gesichert: Datenbank und `sector_map_local.json` im Ordner `backup` des Roots.
+
+### M7 – Task-Wahrheit in VIPER, Windows und Linux, Qt vollständig entfernt (Vorgabe vom 24.10.2026)
+
+**Ziel:** VIPER hält die Definitionen der sieben Tasks und kann sie anzeigen, deployen, bearbeiten, aktivieren/deaktivieren, löschen und
+manuell starten, unter Windows und Linux. Keine zweite Task-Wahrheit außerhalb VIPER, kein eigener Scheduler-Prozess, kein Qt.
+
+**Ergebnis**
+- `viper_ai/tasks/definitions.py`: die sieben Tasks mit unveränderten Skripten, Argumenten, Zeiten, Zeitlimits und Anmelde-Auslösern;
+  Änderungen der Installation in `<root>/scheduler/tasks.json` (Zeitplan, aktiv, gelöscht). `manager.py`: deploy (idempotent, inkl.
+  Aktiviert-Zustand, entfernt gelöschte), edit (Definition ändern, dann OS-Task), delete, restore, run (über den Scheduler), status mit
+  Abweichungen. `windows.py`: Task-XML aus der Definition (Ortszeit ohne UTC-Versatz, `StartWhenAvailable`, `IgnoreNew`, Zeitlimit,
+  angemeldeter Benutzer) über `Register-ScheduledTask`; `linux.py`: systemd-Benutzer-Units (`oneshot`-Dienst, Timer mit `OnCalendar` in der
+  lokalen Zeitzone, `Persistent=true`, Markierung, nur eigene Dateien).
+- CLI `viper-ai tasks list|status|deploy|edit|delete|restore|run` wählt das Backend nach Betriebssystem; die Web-Seite Aufgaben bearbeitet
+  Zeitplan und Aktiv-Schalter, deployt, löscht, stellt wieder her und startet über dieselbe Verwaltung (keine PowerShell im Web).
+  `scheduler/Manage-TradingTasks.ps1` ist entfernt.
+- Pfade: `runtime_paths.py` kennt die Standards je Betriebssystem (Windows `C:\tools\Viper-AI`, Linux `~/.local/share/viper-ai`),
+  Task-Zustand und Einstellungsordner; kein anderes Modul enthält einen Windows-Pfad.
+- Qt vollständig entfernt: Ordner `gui/` aufgelöst (View-Modelle und Dienste nach `viper_ai/shared`, `task_service.py` aufgegangen in
+  `viper_ai/tasks`), Extra `gui` und Entry Point `viper-ai-gui` entfernt (Standardstart `viper-ai-start` / `viper-ai start`), Einstellungen
+  ohne die Felder der Qt-GUI im neuen Ordner `VIPER-AI` (der frühere `TradingAgentGui` wird nur noch gelesen).
+- Prüfung (gezielte Tests, nicht dauerhaft): sieben Definitionen; Windows mit echten Test-Tasks (`ViperTest-*`): anlegen, zweiter Deploy
+  unverändert, Edit in der Aufgabenplanung sichtbar, externe Änderung wird zurückgesetzt, Delete entfernt den Task, Startzeiten ohne Versatz;
+  Linux (WSL Debian, echtes systemd): Units anlegen, idempotent, Edit, externe Änderung, Delete; Web-Endpunkte gegen die Verwaltung; keine
+  Qt-Importe, kein PySide/APScheduler im Paket; pip-Installation in frischer venv (`pip check` ok); plattformneutrale Module unter Linux
+  importierbar. Probelauf gegen die Produktions-Tasks: einzige Abweichung ist „Aktiviert“.
+- Screenshots der Web-Oberfläche mit einer Demo-Datenbank (erfundene Werte) in `docs/images`, eingebunden in `docs/web.*.md`.
+- **Nicht ausgeführt:** Produktionsupdate (siehe M3a, offen).
 
 ## Empfohlene Arbeitsfolge
 

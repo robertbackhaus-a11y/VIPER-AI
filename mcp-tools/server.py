@@ -11,7 +11,7 @@ wird intern mit einer festen Kennung gefuellt.
 
 Konfiguration ueber Umgebungsvariablen:
   TRADING_DB_PATH       Pfad zur SQLite-Datenbank (Standard: <Runtime-Root>\\data\\trading.db aus
-                        runtime_paths, Root = VIPER_TRADING_ROOT oder C:\\tools\\Viper-AI)
+                        runtime_paths, Root = VIPER_TRADING_ROOT oder der Standard von runtime_paths)
   TRADING_TOOL_PROFILE  read (Standard: nur READ-Tools), gui (READ + die GUI-Aktionen) oder
                         admin (alle klassifizierten Tools inkl. sql_execute); ein anderer Wert
                         bricht den Start ab

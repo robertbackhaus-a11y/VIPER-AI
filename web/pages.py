@@ -25,7 +25,7 @@ from .deps import onboarding as vm_onboarding
 from .deps import portfolio as vm_portfolio
 from .deps import sectors as vm_sectors
 from .deps import settings as settings_mod
-from .deps import task_model, task_service, tool_policy
+from .deps import task_definitions, tool_policy
 from .deps import tasks as vm_tasks
 from .deps import transaction_import as vm_import
 from .deps import watchlist as vm_watchlist
@@ -163,13 +163,25 @@ def register(app: FastAPI, state) -> None:  # noqa: C901 - one flat list of endp
         return {"sectors": vm, "effective": eff}
 
     # -- tasks --------------------------------------------------------------------------------------------------------------------
+    def manager():
+        return state.tasks()
+
+    def _task_or_404(name: str) -> str:
+        try:
+            return task_definitions.key_of(name)
+        except KeyError as exc:
+            raise HTTPException(404, f"unbekannter Task: {name}") from exc
+
     @app.get("/api/views/tasks")
     async def tasks():
-        backend = task_service.TaskBackend(state.settings.trading_logs_dir)
-        infos, freshness = await asyncio.gather(asyncio.to_thread(backend.query), engine.read("get_data_freshness"))
+        tm = manager()
+        (pairs, problems), freshness = await asyncio.gather(asyncio.to_thread(lambda: (tm.status(), tm.problems())), engine.read("get_data_freshness"))
         freshness = freshness if isinstance(freshness, dict) and freshness.get("ok") is not False else None
         now = datetime.now()
-        rows = vm_tasks.build_task_rows(infos, freshness, now, backend.logs_dir)
+        infos = [info for _task, info in pairs]
+        rows = jsonable(vm_tasks.build_task_rows(infos, freshness, now, str(tm.root / "logs")))
+        for row, (task, _info) in zip(rows, pairs):  # the VIPER definition next to what the scheduler has
+            row.update(key=task.key, times=list(task.times), day=task.day, enabled=task.enabled, schedule=task_definitions.schedule_text(task))
         etf_rows, etf_levels = vm_tasks.build_etf_rows(freshness, now)
         runs = []
         by_name = {t.name: t for t in infos}
@@ -178,33 +190,74 @@ def register(app: FastAPI, state) -> None:  # noqa: C901 - one flat list of endp
             runs.append({"name": name, "text": text, "level": level, "finished": finished})
             if finished:
                 del state.task_watches[name]
-        return {"rows": jsonable(rows), "summary": vm_tasks.summarize(rows, freshness is not None), "etf": {"headers": vm_tasks.ETF_HEADERS, "rows": etf_rows, "levels": etf_levels},
-                "runs": runs, "refreshed": vm_portfolio.fmt_time(now), "poll_s": TASK_POLL_HINT_S}
+        return {"rows": rows, "summary": vm_tasks.summarize(vm_tasks.build_task_rows(infos, freshness, now), freshness is not None),
+                "etf": {"headers": vm_tasks.ETF_HEADERS, "rows": etf_rows, "levels": etf_levels}, "runs": runs, "refreshed": vm_portfolio.fmt_time(now),
+                "poll_s": TASK_POLL_HINT_S, "backend": tm.backend.title, "problems": problems, "deleted": tm.store().deleted(), "days": list(task_definitions.DAYS)}
+
+    @app.post("/api/tasks/deploy")
+    async def task_deploy():
+        """Bring the scheduler of the operating system to the VIPER definitions (idempotent)."""
+        try:
+            done = await asyncio.to_thread(manager().deploy)
+        except RuntimeError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "results": [{"name": n, "result": r} for n, r in done],
+                "message": ", ".join(f"{n}: {r}" for n, r in done if r != "unverändert") or "Alle Tasks entsprechen der VIPER-Definition."}
+
+    @app.post("/api/tasks/{name}/edit")
+    async def task_edit(name: str, request: Request):
+        """Change the VIPER definition (``times``, ``day``, ``enabled``) and deploy the task."""
+        key = _task_or_404(name)
+        body = await request.json()
+        times = body.get("times")
+        if isinstance(times, str):
+            times = times.split(",")
+        try:
+            task, result = await asyncio.to_thread(manager().edit, key, times, body.get("day"), body.get("enabled"))
+        except (KeyError, ValueError, RuntimeError) as exc:
+            return {"ok": False, "message": str(exc.args[0] if isinstance(exc, KeyError) and exc.args else exc)}
+        return {"ok": True, "message": f"{task.name}: {task_definitions.schedule_text(task)}, {'aktiv' if task.enabled else 'inaktiv'} – {result}"}
+
+    @app.post("/api/tasks/{name}/delete")
+    async def task_delete(name: str):
+        key = _task_or_404(name)
+        try:
+            result = await asyncio.to_thread(manager().delete, key)
+        except RuntimeError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "message": f"{task_definitions.PREFIX}{key}: {result} (wiederherstellen mit „Wiederherstellen“ oder viper-ai tasks restore {key})"}
+
+    @app.post("/api/tasks/{name}/restore")
+    async def task_restore(name: str):
+        key = _task_or_404(name)
+        try:
+            result = await asyncio.to_thread(manager().restore, key)
+        except RuntimeError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "message": f"{task_definitions.PREFIX}{key}: Standarddefinition – {result}"}
 
     @app.post("/api/tasks/{name}/run")
     async def task_run(name: str):
-        """"Jetzt ausführen": starts the existing scheduled task (never the script behind it); a task already followed is not started twice."""
-        if name not in task_model.SPECS:
-            raise HTTPException(404, f"unbekannter Task: {name}")
-        if name in state.task_watches:
+        """"Jetzt ausführen": starts the deployed task through the scheduler (never the script behind it); a task already followed is not started twice."""
+        key = _task_or_404(name)
+        sched = manager().prefix + key
+        if sched in state.task_watches:
             return {"ok": False, "message": "Dieser Task läuft oder startet gerade – kein zweiter Start."}
-        state.task_watches[name] = vm_tasks.RunWatch(name, datetime.now())
-        backend = task_service.TaskBackend(state.settings.trading_logs_dir)
+        state.task_watches[sched] = vm_tasks.RunWatch(sched, datetime.now())
         try:
-            started, message = await asyncio.to_thread(backend.start, name)
+            started, message = await asyncio.to_thread(manager().run, key)
         except Exception as exc:  # noqa: BLE001
             started, message = False, f"Start fehlgeschlagen: {exc}"
         if not started:
-            state.task_watches.pop(name, None)
+            state.task_watches.pop(sched, None)
             return {"ok": False, "message": message}
-        state.task_watches[name].started = datetime.now()
+        state.task_watches[sched].started = datetime.now()
         return {"ok": True, "message": message}
 
     @app.get("/api/tasks/{name}/log")
     async def task_log(name: str):
-        if name not in task_model.SPECS:
-            raise HTTPException(404, f"unbekannter Task: {name}")
-        tail = await asyncio.to_thread(task_service.TaskBackend(state.settings.trading_logs_dir).tail, name)
+        key = _task_or_404(name)
+        tail = await asyncio.to_thread(manager().tail, key)
         return {"name": name, **asdict(tail)}
 
     # -- transaction import -------------------------------------------------------------------------------------------------------
@@ -263,7 +316,7 @@ def register(app: FastAPI, state) -> None:  # noqa: C901 - one flat list of endp
     async def save_settings(request: Request):
         """Only the fields the web uses; the GUI fields (MCP paths, window) stay as they are."""
         body = await request.json()
-        editable = ("ollama_base_url", "ollama_model", "trading_db_path", "trading_logs_dir", "think_enabled", "refresh_interval_s")
+        editable = ("ollama_base_url", "ollama_model", "trading_db_path", "think_enabled", "refresh_interval_s")
         values = {k: body[k] for k in editable if k in body}
         problems = {k: p for k, v in values.items() if (p := settings_mod.validate_edit(k, v))}
         if problems:
@@ -285,7 +338,7 @@ def register(app: FastAPI, state) -> None:  # noqa: C901 - one flat list of endp
         return {
             "rows": [
                 ["Datenbank", engine.db_path], ["Datenbank-Status", "OK" if _ok(db) else f"Fehler: {_message(db)}"],
-                ["Log-Ordner der Tasks", s.trading_logs_dir], ["Einstellungen", str(state.settings_path or settings_mod.settings_path())],
+                ["Log-Ordner der Tasks", str(state.tasks().root / "logs")], ["Task-Definitionen", str(state.tasks().store_path)], ["Einstellungen", str(state.settings_path or settings_mod.settings_path())],
                 ["Engine-Ordner", str(engine.tools._runtime_tools_directory())], ["Ollama-URL", s.ollama_base_url], ["Ollama-Modell", s.ollama_model],
                 ["Ollama erreichbar", "Ja" if ollama.reachable else f"Nein ({ollama.error})"], ["Ollama-Version", ollama.version or "—"],
                 ["Gewähltes Modell vorhanden", ("Ja" if ollama.has_model(s.ollama_model) else "Nein") if ollama.reachable else "—"],

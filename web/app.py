@@ -77,6 +77,15 @@ class State:
         self._orchestrator: tuple[float, Any] | None = None
         self.task_watches: dict = {}  # scheduled tasks started from the Tasks page, followed until the scheduler reports their end
         self.chat = ChatSession(self)
+        self._tasks = None
+
+    def tasks(self):
+        """The task management of this installation (``viper_ai.tasks``); created on first use."""
+        if self._tasks is None:
+            from .deps import task_manager
+
+            self._tasks = task_manager.TaskManager()
+        return self._tasks
 
     async def orchestrator(self, refresh: bool = False) -> Any:
         if refresh or self._orchestrator is None or time.monotonic() - self._orchestrator[0] > ORCHESTRATOR_TTL_S:

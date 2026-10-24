@@ -1,7 +1,7 @@
 # Contributing
 
-This repository holds the VIPER-AI code (`tools/trading/`, `mcp-tools/`, `gui/`, the
-pip packaging `pyproject.toml` / `viper_ai/`, `docs/`). It does not hold the trading database, backups, audit/candidate JSONs, PDFs,
+This repository holds the VIPER-AI code (`tools/trading/`, `mcp-tools/`, `web/`, the
+pip packaging `pyproject.toml` / `viper_ai/` with `viper_ai/shared` and `viper_ai/tasks`, `docs/`). It does not hold the trading database, backups, audit/candidate JSONs, PDFs,
 logs, or any other production data — see `.gitignore`.
 
 ## Before you start
@@ -47,8 +47,8 @@ Update the documentation when a change touches:
 - CLI commands and start parameters, including entry points (`[project.scripts]` / `[project.gui-scripts]`);
 - environment variables and runtime paths (`runtime_paths.py`, `VIPER_TRADING_ROOT`, `TRADING_DB_PATH`, ...);
 - MCP tools, tool profiles and permissions (tool names, parameters, result fields, `TRADING_TOOL_PROFILE`, READ/ACTION);
-- GUI functions and workflows;
-- scheduler tasks and how they are managed (`scheduler/Manage-TradingTasks.ps1`);
+- web front end pages and workflows;
+- the scheduled tasks: their definitions (`viper_ai/tasks/definitions.py`) and the Windows / Linux deployment backends (`viper_ai/tasks/`);
 - the database schema or relevant data formats (`*_local.json`, reports, status and reason codes);
 - trading decision rules and business limits (thresholds, guardrails, constants: with their exact value, as in the constants tables of
   `docs/trading-agent-architecture.*.md`);

@@ -1,12 +1,12 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: Apache-2.0
 
-"""Start the local web front end: ``viper-ai-gui`` (the standard start, no console window), ``viper-ai-web`` (with a console) or ``python -m web``
-(repository root).
+"""Start the local web front end: ``viper-ai-web`` (with a console), ``viper-ai-start`` / ``viper-ai start`` (the standard start, no console window),
+``python -m viper_ai.web`` or ``python -m web`` (repository root).
 
 Listens on 127.0.0.1 only and opens the browser unless ``--no-browser`` is given.  When VIPER already runs on the port, no second server is started:
 the browser is opened on the running one.  The database is the one of the settings (``trading_db_path``, default ``<root>\\data\\trading.db`` of
-``VIPER_TRADING_ROOT``) unless ``--db`` names another.  Without a console (``pythonw``) the output goes to ``web.log`` in the settings folder.
+``runtime_paths``) unless ``--db`` names another.  Without a console (``pythonw``) the output goes to ``web.log`` in the settings folder.
 """
 
 from __future__ import annotations

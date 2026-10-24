@@ -106,14 +106,6 @@
         "tool_policy.py",
         "trading_sqlite.py"
       ]
-    },
-    {
-      "name": "scheduler",
-      "source": "scheduler",
-      "target": "scheduler",
-      "files": [
-        "Manage-TradingTasks.ps1"
-      ]
     }
   ],
   "protected": [

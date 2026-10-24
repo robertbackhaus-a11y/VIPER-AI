@@ -1,21 +1,17 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Qt-free modules of ``gui`` the web reuses, imported the same way in both layouts.
+"""The shared modules the web uses: view models and services (``viper_ai.shared``) and the task management (``viper_ai.tasks``).
 
-pip installation: ``viper_ai.web`` next to ``viper_ai.gui``; repository checkout: ``web/`` next to ``gui/`` (repository root on ``sys.path``).
+Imported absolutely in both layouts: pip installation (``viper_ai.web``) and repository checkout (``web/`` next to the ``viper_ai`` folder, repository root on ``sys.path``).
 """
 
 from __future__ import annotations
 
-try:  # pip installation
-    from ..gui.services import settings, task_model, task_service, tool_policy
-    from ..gui.services import ollama_client, tool_loop
-    from ..gui.viewmodels import effective, onboarding, portfolio, reason_codes, sectors, tasks, transaction_import, watchlist, watchlist_edit
-except ImportError:  # repository checkout
-    from gui.services import settings, task_model, task_service, tool_policy  # type: ignore[no-redef]
-    from gui.services import ollama_client, tool_loop  # type: ignore[no-redef]
-    from gui.viewmodels import effective, onboarding, portfolio, reason_codes, sectors, tasks, transaction_import, watchlist, watchlist_edit  # type: ignore[no-redef]
+from viper_ai.shared.services import ollama_client, settings, task_model, tool_loop, tool_policy
+from viper_ai.shared.viewmodels import effective, onboarding, portfolio, reason_codes, sectors, tasks, transaction_import, watchlist, watchlist_edit
+from viper_ai.tasks import definitions as task_definitions
+from viper_ai.tasks import manager as task_manager
 
-__all__ = ["settings", "task_model", "task_service", "tool_policy", "ollama_client", "tool_loop", "effective", "onboarding", "portfolio", "reason_codes", "sectors",
-           "tasks", "transaction_import", "watchlist", "watchlist_edit"]
+__all__ = ["settings", "task_model", "task_manager", "task_definitions", "tool_policy", "ollama_client", "tool_loop", "effective", "onboarding", "portfolio",
+           "reason_codes", "sectors", "tasks", "transaction_import", "watchlist", "watchlist_edit"]

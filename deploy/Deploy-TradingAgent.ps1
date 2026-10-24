@@ -108,7 +108,7 @@ function Get-Entries($m) {
 function Invoke-Check {
     Write-Host "== Check  (repo: $repo | root: $Root)"
     Write-Host "[repo]"
-    foreach ($d in 'tools\trading', 'mcp-tools', 'scheduler', 'deploy') {
+    foreach ($d in 'tools\trading', 'mcp-tools', 'deploy') {
         if (Test-Path -LiteralPath (Join-Path $repo $d)) { Write-Ok "repo folder $d" } else { Add-Err "repo folder missing: $d" }
     }
     Write-Host "[production]"

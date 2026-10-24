@@ -2,12 +2,12 @@
 #
 #   install:  python -m pip install <repo-path>
 #   update:   python -m pip install --upgrade <repo-path>
-#   web:      python -m pip install "<repo-path>[web]"   ([gui] is an alias of [web])
+#   web:      python -m pip install "<repo-path>[web]"
 #
 # The existing source folders are mapped into the package, nothing is moved in the repository:
 #   tools/trading -> viper_ai.app   (domain modules + CLI scripts; only the versioned *_v1.json universe files are packaged)
 #   mcp-tools     -> viper_ai.mcp   (MCP server)
-#   gui           -> viper_ai.gui   (the Qt-free view models and services the web front end reuses; the Qt desktop GUI was removed in M6)
+#   viper_ai      -> viper_ai       (CLI, viper_ai.shared: view models and services of the web, viper_ai.tasks: task definitions and OS backends)
 #   web           -> viper_ai.web   (local web front end, needs the extra "web")
 # Runtime data (database, logs, scheduler, *_local.json, app\data) stays under the trading root (C:\tools\Viper-AI or VIPER_TRADING_ROOT)
 # and is never part of the package, so pip install / upgrade / uninstall cannot touch it.
@@ -34,14 +34,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # the local web front end (viper-ai-web) and its reasoning workflow (LangGraph with the SQLite checkpointer); uvicorn and starlette come with mcp.
-# The scheduled jobs are Windows scheduled tasks (scheduler/Manage-TradingTasks.ps1), the web only manages them.
+# The scheduled tasks are defined in viper_ai.tasks and deployed to the Windows Task Scheduler or systemd user timers; there is no scheduler of VIPER's own.
 web = [
-    "fastapi==0.162.0",
-    "langgraph==1.2.17",
-    "langgraph-checkpoint-sqlite==3.1.2",
-]
-# the former extra of the Qt desktop GUI (removed in M6): kept as an alias of "web", so an installation command with [gui] installs the web front end
-gui = [
     "fastapi==0.162.0",
     "langgraph==1.2.17",
     "langgraph-checkpoint-sqlite==3.1.2",
@@ -63,7 +57,7 @@ viper-ai-market-intelligence = "viper_ai.cli:market_intelligence"
 viper-ai-web = "viper_ai.cli:web"
 
 [project.gui-scripts]
-viper-ai-gui = "viper_ai.cli:gui"
+viper-ai-start = "viper_ai.cli:start"
 viper-ai-task = "viper_ai.cli:task"
 
 [tool.setuptools]
@@ -72,25 +66,22 @@ packages = [
     "viper_ai",
     "viper_ai.app",
     "viper_ai.mcp",
-    "viper_ai.gui",
-    "viper_ai.gui.services",
-    "viper_ai.gui.viewmodels",
+    "viper_ai.shared",
+    "viper_ai.shared.services",
+    "viper_ai.shared.viewmodels",
+    "viper_ai.tasks",
     "viper_ai.web",
-    "viper_ai.scheduler",
 ]
 
 [tool.setuptools.package-dir]
 "viper_ai.app" = "tools/trading"
 "viper_ai.mcp" = "mcp-tools"
-"viper_ai.gui" = "gui"
 "viper_ai.web" = "web"
-"viper_ai.scheduler" = "scheduler"
 
 [tool.setuptools.package-data]
 # versioned universe files only; *_local.json and their backups are private runtime data
 "viper_ai.app" = ["universe/*_v1.json"]
 "viper_ai.web" = ["static/*", "static/js/*", "static/vendor/*"]
-"viper_ai.scheduler" = ["Manage-TradingTasks.ps1"]
 
 [tool.setuptools.dynamic]
 version = { attr = "viper_ai.__version__" }

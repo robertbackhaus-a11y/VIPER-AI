@@ -10,11 +10,13 @@ Two layouts run the same code:
 * the pip installation (``site-packages\\viper_ai\\app``): the code folder belongs to pip and is replaced on every upgrade, so nothing private may live there.  The private files are
   then read from and written to the runtime root instead: ``<trading root>\\app\\universe`` (the same files the deployed copy uses) and ``<trading root>\\app\\data``.
 
-The trading root is ``C:\\tools\\Viper-AI`` unless the environment variable ``VIPER_TRADING_ROOT`` names another folder (it must be absolute: a relative root would depend on the
-working directory of whoever starts a script, for example the Task Scheduler).  This module is the only place that knows the default: the web front end, the MCP server, the
+The trading root is ``C:\\tools\\Viper-AI`` on Windows and ``$XDG_DATA_HOME/viper-ai`` (``~/.local/share/viper-ai``) elsewhere, unless the environment variable
+``VIPER_TRADING_ROOT`` names another folder (it must be absolute: a relative root would depend on the working directory of whoever starts a script, for example the
+scheduler).  This module is the only place that knows the default: the web front end, the MCP server, the
 scheduled tasks and every script derive their paths from it.  Every default runtime path is derived from the root: the database ``<root>\\data\\trading.db``
 (:func:`default_db_path`), the data folder with reports and caches (:func:`data_dir`) and the logs (:func:`logs_dir`).  An explicit ``--db`` / ``--db-path`` of a script,
-``TRADING_DB_PATH`` of the MCP server and a path saved in the web settings always win over the default.
+``TRADING_DB_PATH`` of the MCP server and a path saved in the web settings always win over the default.  The task definitions edited in VIPER live in
+``<root>/scheduler/tasks.json`` (:func:`tasks_file`), the settings of the web front end in the per-user settings folder (:func:`settings_dir`).
 """
 
 from __future__ import annotations
@@ -24,7 +26,21 @@ from pathlib import Path
 from typing import Union
 
 TRADING_ROOT_ENV = "VIPER_TRADING_ROOT"
-DEFAULT_TRADING_ROOT = Path(r"C:\tools\Viper-AI")
+IS_WINDOWS = os.name == "nt"
+WINDOWS_DEFAULT_ROOT = r"C:\tools\Viper-AI"
+
+
+def _xdg(variable: str, fallback: str) -> Path:
+    configured = os.environ.get(variable, "").strip()
+    return Path(configured) if configured and Path(configured).is_absolute() else Path.home() / fallback
+
+
+def default_trading_root() -> Path:
+    """The root without ``VIPER_TRADING_ROOT``: ``C:\\tools\\Viper-AI`` on Windows, ``$XDG_DATA_HOME/viper-ai`` elsewhere."""
+    return Path(WINDOWS_DEFAULT_ROOT) if IS_WINDOWS else _xdg("XDG_DATA_HOME", ".local/share") / "viper-ai"
+
+
+DEFAULT_TRADING_ROOT = default_trading_root()
 CODE_DIR = Path(__file__).resolve().parent
 PACKAGED_UNIVERSE = CODE_DIR / "universe"
 PACKAGE_NAME = "viper_ai"
@@ -54,6 +70,30 @@ def default_db_path() -> Path:
 def logs_dir() -> Path:
     """``<root>\\logs``: the logs of the scheduled tasks."""
     return trading_root() / "logs"
+
+
+def scheduler_dir() -> Path:
+    """``<root>\\scheduler``: VIPER's own state of the scheduled tasks."""
+    return trading_root() / "scheduler"
+
+
+def tasks_file() -> Path:
+    """``<root>\\scheduler\\tasks.json``: the changes made in VIPER to the built-in task definitions (schedule, enabled, deleted)."""
+    return scheduler_dir() / "tasks.json"
+
+
+def settings_dir() -> Path:
+    """The per-user settings folder of the web front end: ``%LOCALAPPDATA%\\VIPER-AI`` on Windows, ``$XDG_CONFIG_HOME/viper-ai`` elsewhere."""
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "VIPER-AI"
+    return _xdg("XDG_CONFIG_HOME", ".config") / "viper-ai"
+
+
+def legacy_settings_dir() -> Path:
+    """The settings folder used up to October 2026 (``%LOCALAPPDATA%\\TradingAgentGui``); only read when :func:`settings_dir` has no settings yet."""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "TradingAgentGui"
 
 
 def is_installed_package(code_dir: Path = CODE_DIR) -> bool:

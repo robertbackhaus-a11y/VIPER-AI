@@ -14,7 +14,9 @@ export async function render(target) {
   const message = el("div");
   const formRows = FIELDS.map(([key, label]) => {
     const value = current.settings[key];
-    const input = typeof value === "boolean" ? el("input", { type: "checkbox", checked: value }) : el("input", { value: value ?? "", style: "width:100%", list: key === "ollama_model" ? "models" : null });
+    const input = typeof value === "boolean" ? el("input", { type: "checkbox", checked: value })
+      : key === "ollama_model" && diag.models.length ? modelSelect(value, diag.models)
+      : el("input", { value: value ?? "", style: "width:100%" });
     inputs[key] = input;
     return [label, input];
   });
@@ -37,9 +39,21 @@ export async function render(target) {
     diag.warnings.length ? diag.warnings.map((w) => el("div", { class: "note warning" }, w)) : "",
     el("div", { class: "grid cols-2" },
       panel("Diagnose", kv(diag.rows)),
-      panel("Einstellungen", kv(formRows), el("datalist", { id: "models" }, diag.models.map((m) => el("option", { value: m }))),
+      panel("Einstellungen", kv(formRows),
+        diag.models.length ? "" : el("p", { class: "muted small" }, "Ollama ist nicht erreichbar: das Modell kann nur von Hand eingetragen werden."),
         el("div", { class: "head", style: "margin-top:10px" }, el("button", { class: "primary", onclick: save }, "Speichern")), message),
       el("div", { class: "span-2" }, panel("Tool-Klassifikation (tool_policy.py)", el("div", { class: "table-wrap" }, el("table", {},
         el("thead", {}, el("tr", {}, ["Tool", "Klasse", "Web"].map((h) => el("th", {}, h)))),
         el("tbody", {}, diag.tools.map(([name, cls, allowed]) => el("tr", {}, el("td", {}, name), el("td", {}, cls), el("td", { class: allowed === "erlaubt" ? "up" : "down" }, allowed))))))))));
+}
+
+/** Every model the running Ollama offers; a configured model Ollama does not have stays selectable, marked as not installed. */
+function modelSelect(value, models) {
+  const names = [...models].sort((a, b) => a.localeCompare(b));
+  const missing = value && !names.includes(value) && !names.includes(`${value}:latest`);
+  const select = el("select", { style: "width:100%" },
+    missing ? el("option", { value }, `${value} (nicht installiert)`) : null,
+    names.map((m) => el("option", { value: m }, m)));
+  select.value = missing ? value : names.includes(value) ? value : `${value}:latest`;
+  return select;
 }

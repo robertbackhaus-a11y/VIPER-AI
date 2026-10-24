@@ -85,7 +85,7 @@ Die OpenAPI-Beschreibung liegt unter `/api/docs`.
 | Chat | Fragen an das lokale Modell mit den READ-Tools des MCP-Profils `read`; Antwort, Thinking, Tool-Aufrufe und Fehler getrennt; Stopp, Neuer Chat |
 | Intelligence | Analyse starten; aktive Thesen mit Vorschlag, Engine-Aktion, Konfidenz, Datenstand, Gültigkeit und Neubewertungsgründen; Analysen und Prozesse (Fortsetzen nach Abbruch); letzte Ereignisse |
 | Analyse | ein Analysefall: Vorschlag neben der Engine-Aktion (keine Order), These und Gegenthese mit Belegen, Annahmen, Unsicherheit, Datenlücken, Risiko- und Portfoliokontext, Belegkatalog, tatsächliche Transaktionen seit der Analyse, Schrittprotokoll |
-| Einstellungen | Diagnose (Pfade, Datenbank, Ollama, Tool-Klassifikation) und die Einstellungen, die das Web nutzt |
+| Einstellungen | Diagnose (Pfade, Datenbank, Ollama, Tool-Klassifikation) und die Einstellungen, die das Web nutzt; das Modell wird aus allen Modellen des laufenden Ollama gewählt (ein nicht installiertes ist markiert) |
 
 - Datenstand, Währung und Berechnungsbasis stehen im Kopf jeder Seite; der Tooltip „Berechnungsbasis“ nennt die Regeln aus Abschnitt 4.
 - Rechts oben stehen „Datenbank OK/Fehler“ und „Ollama OK/Fehler“ (gelb „Modell fehlt“, wenn Ollama läuft, das eingestellte Modell aber nicht installiert ist; Details im Tooltip und auf der Seite Einstellungen) und das Zahnrad, das die Einstellungen öffnet. Ist Ollama nicht erreichbar, betrifft das nur Chat und Analysen; Dashboard, Portfolio und Engine arbeiten weiter.

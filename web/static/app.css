@@ -154,3 +154,29 @@ tr.edited td { background: rgba(108, 182, 255, .07); }
   .status { display: none; }
   .gear { margin-left: auto; }
 }
+
+/* intelligence: live steps, reference chips, collapsible evidence */
+.pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-right: 6px; vertical-align: 1px; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+tr.running td { background: rgba(242, 193, 78, .05); }
+.kpi .value.compact { font-size: 1.15rem; }
+.agree { margin: -4px 0 14px; font-size: .92rem; }
+.agree.ok { color: var(--accent); }
+.agree.warn { color: var(--warn); }
+.big-value { font-size: 1.2rem; font-weight: 600; margin-bottom: 4px; }
+.prose p { margin: 0 0 8px; line-height: 1.55; }
+details.more > summary { cursor: pointer; color: var(--accent); font-size: .88rem; margin: 6px 0; }
+ul.evidence { padding-left: 18px; margin: 6px 0; }
+ul.evidence li { margin: 6px 0; line-height: 1.45; }
+details.ref { display: inline-block; position: relative; margin: 0 1px; }
+details.ref > summary { list-style: none; cursor: pointer; display: inline-block; padding: 0 7px; border-radius: 999px; font-size: .75rem; line-height: 1.6;
+  border: 1px solid #1f4a35; color: var(--accent-2); background: rgba(46, 232, 138, .05); white-space: nowrap; }
+details.ref > summary::-webkit-details-marker { display: none; }
+details.ref[open] > summary { border-color: var(--accent); color: var(--accent); }
+details.ref.unknown > summary { border-color: #5a2128; color: #ffb3ba; }
+.ref-box { position: absolute; left: 0; top: calc(100% + 4px); z-index: 30; width: max-content; max-width: min(440px, 80vw); background: #0b1512; border: 1px solid #1f4a35;
+  border-radius: 8px; padding: 8px 10px; font-size: .82rem; box-shadow: 0 6px 24px rgba(0, 0, 0, .6); }
+.ref-box dl.kv { gap: 2px 10px; }
+.ref-box .ref-label { font-weight: 600; margin-bottom: 2px; }
+.ref-box .ref-item + .ref-item { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }

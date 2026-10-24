@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Add the tables of the reasoning analyses (``analysis_case``, ``analysis_step``; see ``analysis_store.py``) and, when LangGraph is installed (extra
-``web``), the checkpoint tables of its ``SqliteSaver`` (``checkpoints``, ``writes``), so the workflow needs no database of its own. Dry run by default."""
+``web``), the checkpoint tables of its ``SqliteSaver`` (``checkpoints``, ``writes``), so the workflow needs no database of its own. Dry run by default.
+
+Version 2 makes ``analysis_step.finished_at`` nullable (a running step); an existing version-1 table is rebuilt with all its rows."""
 
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ def inspect_migration(conn: sqlite3.Connection) -> dict:
     return {
         "table_exists": exists,
         "row_count": conn.execute("SELECT COUNT(*) FROM analysis_case").fetchone()[0] if exists else None,
+        "step_table_upgrade": analysis_store.step_needs_upgrade(conn) if exists else False,
         "feature_version": version[0] if version else None,
         "target_feature_version": FEATURE_VERSION,
     }
@@ -37,6 +40,7 @@ def apply_migration(conn: sqlite3.Connection) -> dict:
     try:
         conn.executescript(
             "BEGIN IMMEDIATE;\n"
+            + (analysis_store.UPGRADE_STEP_SQL if before["step_table_upgrade"] else "")
             + analysis_store.SCHEMA_SQL
             + f"""
         INSERT INTO metadata(key, value, updated_at)

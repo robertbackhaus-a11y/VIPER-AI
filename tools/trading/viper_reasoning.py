@@ -18,7 +18,7 @@
 * LangGraph does the orchestration: parallel branches, conditional edges, and checkpointing with ``SqliteSaver`` in the trading database
   (one thread per case; no database of its own), so a
   case interrupted by a crash or a failed LLM call continues with :func:`resume` from its last finished step.  The step protocol is written to
-  ``analysis_step`` as each node finishes; the result to ``analysis_case``.
+  ``analysis_step`` as each node starts and finishes; the result to ``analysis_case``.
 * Re-evaluation: the case stores a fingerprint of its inputs; :func:`staleness` says what changed since (new prices, news, events, position,
   engine action, expired validity), and :func:`run_analysis` with ``supersedes_id`` starts the follow-up case.  There is no permanent loop.
 """
@@ -250,21 +250,23 @@ def build_graph(llm: LLM, checkpointer=None):
     from langgraph.graph import END, START, StateGraph
 
     def step(node: str, kind: str, fn: Callable[[State], dict]) -> Callable[[State], dict]:
-        """Run one node and write its protocol row (output or error) for the Intelligence page."""
+        """Run one node and write its protocol row for the Intelligence page: at the start (running), then with its output or error."""
         def run(state: State) -> dict:
             started = analysis_store.now()
+            with writable(state["db_path"]) as conn:
+                step_id = analysis_store.start_step(conn, state["case_id"], node, kind, started)
             try:
                 update = fn(state)
             except Exception as exc:
                 with writable(state["db_path"]) as conn:
-                    analysis_store.add_step(conn, state["case_id"], node, kind, started, None, f"{type(exc).__name__}: {exc}"[:1000])
+                    analysis_store.finish_step(conn, step_id, state["case_id"], node, kind, started, None, f"{type(exc).__name__}: {exc}"[:1000])
                 raise
             shown = {k: v for k, v in update.items() if k not in ("log", "observation", "evidence")}
             if node == "observe":
                 shown = {"evidence": len(update.get("evidence") or {}), "news": len(update["observation"]["news"]), "events": len(update["observation"]["events"]),
                          "held": update["observation"]["held"], "engine_action": update["observation"]["engine"]["action"]}
             with writable(state["db_path"]) as conn:
-                analysis_store.add_step(conn, state["case_id"], node, kind, started, shown)
+                analysis_store.finish_step(conn, step_id, state["case_id"], node, kind, started, shown)
             return {**update, "log": [node]}
         return run
 
@@ -340,7 +342,8 @@ def build_graph(llm: LLM, checkpointer=None):
         prompt = (f"These: {json.dumps(state['hypothesis'], ensure_ascii=False)}\nPrüfung der Belege: {json.dumps(state['evidence_check'], ensure_ascii=False)}\n"
                   f"Risiko und Portfoliokontext (deterministisch): {json.dumps(state['risk'], ensure_ascii=False)}\nErlaubte Aktionen: {', '.join(allowed)}.\n"
                   "Wäge These und Gegenthese ab und schlage eine Aktion vor. Weiche von der Engine-Aktion nur mit Begründung ab.\n"
-                  'Antwort: {"action": "...", "rationale": "...", "confidence": "low|medium|high", "horizon_days": 30, "review_triggers": ["..."], '
+                  'Antwort: {"action": "...", "rationale": "2-4 Sätze: warum diese Aktion, die 2-4 entscheidenden Faktoren und warum die Gegenargumente '
+                  'zu keiner anderen Aktion führen; die Belege nicht erneut aufzählen", "confidence": "low|medium|high", "horizon_days": 30, "review_triggers": ["..."], '
                   '"evidence": ["ID"]}')
         a = parse_json(llm(SYSTEM, prompt))
         return {"proposal": {"action": str(a.get("action") or "").upper(), "rationale": str(a.get("rationale") or ""), "confidence": str(a.get("confidence") or "").lower(),

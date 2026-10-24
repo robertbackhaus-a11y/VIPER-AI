@@ -73,6 +73,10 @@ packages = [
     "viper_ai.web",
 ]
 
+[tool.setuptools.cmdclass]
+# start every build from an empty build/lib, so a module removed from the repository never lands in the wheel (viper_ai/_build.py)
+build_py = "viper_ai._build.CleanBuildPy"
+
 [tool.setuptools.package-dir]
 "viper_ai.app" = "tools/trading"
 "viper_ai.mcp" = "mcp-tools"

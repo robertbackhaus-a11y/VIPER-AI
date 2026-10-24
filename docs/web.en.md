@@ -102,7 +102,7 @@ The OpenAPI description is at `/api/docs`.
 
 Switching production over to this version (each step can be undone, runtime data stays untouched):
 
-1. Install the new version with the extra `web` (from a checkout delete the folders `build` and `*.egg-info` first, otherwise old files end up in the package). The extra `[gui]` no longer exists.
+1. Install the new version with the extra `web` (also from a checkout without cleaning up first: every build starts from an empty `build/lib`). The extra `[gui]` no longer exists.
 2. Switch the shortcuts: autostart (`shell:startup\VIPER-AI.lnk`) and desktop shortcut to `<venv>\Scripts\viper-ai-start.exe` (the autostart with `--no-browser`); `viper-ai-gui.exe` is removed by the upgrade.
 3. `viper-ai tasks deploy`: deploys the seven definitions (action, schedule, settings, **enabled state**) to the Windows Task Scheduler. Tasks that were disabled (for example after the takeover by the integrated scheduler, which is removed now) are enabled again. Check with `viper-ai tasks list`.
 4. Way back: install the previous version again; the tasks stay as they are (name, action and schedule did not change).

@@ -479,7 +479,7 @@ Seit 22.10.2026 **läuft produktiv die pip-Installation**, seit 24.10.2026 die W
 | Update auf ein späteres Release | derselbe Befehl mit `--upgrade` und dem neuen Tag |
 | Version und Pfade prüfen | `viper-ai --version`, `viper-ai paths` |
 
-Immer ein Release-Tag oder das Release-Wheel installieren, nie den beweglichen Branch `main`. Ohne `[web]` wird nur das Basispaket installiert. Aus einem Checkout vorher `build` und `*.egg-info` löschen (setuptools baut im Quellbaum und nimmt sonst alte Dateien mit).
+Immer ein Release-Tag oder das Release-Wheel installieren, nie den beweglichen Branch `main`. Ohne `[web]` wird nur das Basispaket installiert. Eine Installation aus einem Checkout baut im Quellbaum; jeder Build beginnt mit einem leeren `build/lib` (`viper_ai/_build.py`), sodass aus dem Repository entfernte Dateien nie im Paket landen.
 
 - Paket: Distribution `VIPER-AI`, Import-Paket `viper_ai`; die Repository-Ordner werden ohne Verschieben darauf abgebildet: `tools/trading` -> `viper_ai.app`, `mcp-tools` -> `viper_ai.mcp`, `web` -> `viper_ai.web` (Web-Frontend, Extra `web`). Eigene Unterpakete von `viper_ai`: `viper_ai.shared` (View-Modelle und Dienste des Web-Frontends, früher `gui/`) und `viper_ai.tasks` (Taskdefinitionen und Scheduler-Backends).
 - Umgebungen: Die getestete pip-Variante ist **eine** Umgebung mit dem Extra `web` (Basispaket `mcp`, `pydantic`, `pypdf` plus `fastapi`, `langgraph`, `langgraph-checkpoint-sqlite`) für Tasks, MCP-Server und Web-Frontend; kein Qt, kein PySide, kein Extra `gui` mehr. Die getrennten `.venv` / `.venv-gui` gehören zur Legacy-Installation und bleiben dort.

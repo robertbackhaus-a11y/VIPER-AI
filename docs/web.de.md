@@ -102,7 +102,7 @@ Die OpenAPI-Beschreibung liegt unter `/api/docs`.
 
 Umstellung der Produktion auf diese Version (je Schritt umkehrbar, Laufzeitdaten bleiben unberührt):
 
-1. Die neue Version mit dem Extra `web` installieren (aus einem Checkout zuerst die Ordner `build` und `*.egg-info` löschen, sonst landen alte Dateien im Paket). Das Extra `[gui]` gibt es nicht mehr.
+1. Die neue Version mit dem Extra `web` installieren (auch aus einem Checkout ohne vorheriges Aufräumen: jeder Build beginnt mit einem leeren `build/lib`). Das Extra `[gui]` gibt es nicht mehr.
 2. Verknüpfungen umstellen: Autostart (`shell:startup\VIPER-AI.lnk`) und Desktop-Verknüpfung auf `<venv>\Scripts\viper-ai-start.exe` (Autostart mit `--no-browser`); `viper-ai-gui.exe` wird beim Upgrade entfernt.
 3. `viper-ai tasks deploy`: überträgt die sieben Definitionen (Aktion, Zeitplan, Einstellungen, **Aktiviert-Zustand**) in die Windows-Aufgabenplanung. Waren die Tasks deaktiviert (zum Beispiel nach der Übernahme durch den inzwischen entfernten integrierten Scheduler), sind sie danach wieder aktiv. Mit `viper-ai tasks list` prüfen.
 4. Rückweg: die vorige Version wieder installieren; die Tasks bleiben dabei, wie sie sind (Name, Aktion und Zeitplan haben sich nicht geändert).

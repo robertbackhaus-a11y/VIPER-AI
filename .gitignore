@@ -1,0 +1,38 @@
+# Databases and exports (private data never belongs in the repository)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.csv
+!examples/trading-import-example.csv
+*.xlsx
+*.xls
+*.bak-*
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+secrets*
+credentials*
+*.pem
+*.key
+tools/trading/universe/*_local.json
+
+# Runtime output
+logs/
+*.log
+data/
+fundamentals-audit/
+**/backup/
+**/backups/
+**/latest.json
+
+# Python
+*.pyc
+__pycache__/
+
+# Packaging (pip install <repo-path> builds in the tree)
+build/
+dist/
+*.egg-info/

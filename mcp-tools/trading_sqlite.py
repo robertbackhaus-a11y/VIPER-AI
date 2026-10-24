@@ -1,0 +1,1493 @@
+# Copyright (C) 2026 Robert Backhaus
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+title: Trading SQLite
+author: VIPER-AI
+description: Direct unrestricted SQLite access to the local trading database with multi-statement and multi-result support.
+version: 1.7.0
+license: MIT
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import os
+import sqlite3
+import sys
+import time
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class Tools:
+    class Valves(BaseModel):
+        database_path: str = Field(
+            default=r"C:\tools\trading\data\trading.db",
+            description="Full path to the local trading SQLite database.",
+        )
+
+        timeout_seconds: float = Field(
+            default=1.0,
+            description="SQLite connection timeout in seconds.",
+        )
+
+        busy_timeout_ms: int = Field(
+            default=1000,
+            description="SQLite busy timeout in milliseconds.",
+        )
+
+        max_rows_per_statement: int = Field(
+            default=500,
+            description="Maximum number of rows returned per SQL statement.",
+        )
+
+        market_intelligence_report_dir: str = Field(
+            default="",
+            description=(
+                "Directory of the market-intelligence reports. Empty means "
+                "<directory of the database>\\market-intelligence."
+            ),
+        )
+
+        discovery_report_dir: str = Field(
+            default="",
+            description=(
+                "Directory of the candidate-discovery reports. Empty means "
+                "<directory of the database>\\candidate-discovery."
+            ),
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    # ============================================================
+    # Connection
+    # ============================================================
+
+    def _connect(self) -> sqlite3.Connection:
+        db_path = Path(self.valves.database_path)
+
+        if not db_path.exists():
+            raise FileNotFoundError(f"Trading database not found: {db_path}")
+
+        conn = sqlite3.connect(
+            str(db_path),
+            timeout=float(self.valves.timeout_seconds),
+            isolation_level="DEFERRED",
+        )
+
+        conn.row_factory = sqlite3.Row
+
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute(f"PRAGMA busy_timeout={int(self.valves.busy_timeout_ms)};")
+
+        return conn
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        """Same settings as :meth:`_connect`, but the connection cannot write (``mode=ro`` and ``query_only``): for the READ tools."""
+        db_path = Path(self.valves.database_path)
+
+        if not db_path.exists():
+            raise FileNotFoundError(f"Trading database not found: {db_path}")
+
+        conn = sqlite3.connect(
+            f"file:///{db_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+            timeout=float(self.valves.timeout_seconds),
+        )
+
+        conn.row_factory = sqlite3.Row
+
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute(f"PRAGMA busy_timeout={int(self.valves.busy_timeout_ms)};")
+        conn.execute("PRAGMA query_only=ON;")
+
+        return conn
+
+    # ============================================================
+    # SQL statement splitting
+    # ============================================================
+
+    def _split_sql_statements(self, sql: str) -> list[str]:
+        """
+        Split one SQL script into individual executable SQLite statements.
+
+        Uses sqlite3.complete_statement() so semicolons inside valid SQL
+        constructs do not cause naive splitting.
+
+        Supports a final statement without a trailing semicolon.
+        """
+
+        statements: list[str] = []
+        buffer = ""
+
+        for char in sql:
+            buffer += char
+
+            if char == ";" and sqlite3.complete_statement(buffer):
+                statement = buffer.strip()
+
+                if statement.endswith(";"):
+                    statement = statement[:-1].rstrip()
+
+                if statement:
+                    statements.append(statement)
+
+                buffer = ""
+
+        if buffer.strip():
+            statement = buffer.strip()
+
+            if statement:
+                statements.append(statement)
+
+        return statements
+
+    # ============================================================
+    # Serialization
+    # ============================================================
+
+    def _serialize_value(self, value: Any) -> Any:
+        """
+        Convert SQLite values into JSON-safe values.
+        """
+
+        if isinstance(value, bytes):
+            return value.hex()
+
+        return value
+
+    def _serialize_row(self, row: sqlite3.Row) -> dict:
+        """
+        Convert sqlite3.Row into a JSON-safe dictionary.
+        """
+
+        return {key: self._serialize_value(row[key]) for key in row.keys()}
+
+    # ============================================================
+    # Main SQL execution
+    # ============================================================
+
+    def _sql_execute_sync(self, sql: str) -> dict:
+        """
+        Synchronous SQLite implementation.
+
+        All statements in one tool call are executed in one transaction.
+
+        If any statement fails:
+        - execution stops
+        - the whole transaction is rolled back
+        """
+
+        total_started = time.perf_counter()
+
+        sql_clean = (sql or "").strip()
+
+        if not sql_clean:
+            return {
+                "ok": False,
+                "error": "No SQL provided.",
+                "statement_count": 0,
+                "executed_statements": 0,
+                "rolled_back": False,
+                "results": [],
+                "elapsed_ms": round(
+                    (time.perf_counter() - total_started) * 1000,
+                    3,
+                ),
+            }
+
+        # --------------------------------------------------------
+        # Parse SQL
+        # --------------------------------------------------------
+
+        try:
+            statements = self._split_sql_statements(sql_clean)
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"SQL parsing failed: {exc}",
+                "statement_count": 0,
+                "executed_statements": 0,
+                "rolled_back": False,
+                "results": [],
+                "elapsed_ms": round(
+                    (time.perf_counter() - total_started) * 1000,
+                    3,
+                ),
+            }
+
+        if not statements:
+            return {
+                "ok": False,
+                "error": "No executable SQL statement found.",
+                "statement_count": 0,
+                "executed_statements": 0,
+                "rolled_back": False,
+                "results": [],
+                "elapsed_ms": round(
+                    (time.perf_counter() - total_started) * 1000,
+                    3,
+                ),
+            }
+
+        conn: sqlite3.Connection | None = None
+        results: list[dict] = []
+
+        try:
+            conn = self._connect()
+
+            # Explicit transaction.
+            conn.execute("BEGIN")
+
+            for index, statement in enumerate(
+                statements,
+                start=1,
+            ):
+                statement_started = time.perf_counter()
+
+                try:
+                    before_changes = conn.total_changes
+
+                    cursor = conn.execute(statement)
+
+                    affected_rows = conn.total_changes - before_changes
+
+                    # ------------------------------------------------
+                    # Query / RETURNING result
+                    # ------------------------------------------------
+
+                    if cursor.description is not None:
+                        max_rows = max(
+                            1,
+                            int(self.valves.max_rows_per_statement),
+                        )
+
+                        fetched_rows = cursor.fetchmany(max_rows + 1)
+
+                        truncated = len(fetched_rows) > max_rows
+
+                        if truncated:
+                            fetched_rows = fetched_rows[:max_rows]
+
+                        rows = [self._serialize_row(row) for row in fetched_rows]
+
+                        columns = [column[0] for column in cursor.description]
+
+                        result = {
+                            "statement_index": index,
+                            "ok": True,
+                            "type": "query",
+                            "columns": columns,
+                            "rows": rows,
+                            "row_count": len(rows),
+                            "truncated": truncated,
+                            "affected_rows": affected_rows,
+                        }
+
+                    # ------------------------------------------------
+                    # Non-query result
+                    # ------------------------------------------------
+
+                    else:
+                        result = {
+                            "statement_index": index,
+                            "ok": True,
+                            "type": "execute",
+                            "affected_rows": affected_rows,
+                        }
+
+                    cursor.close()
+
+                except Exception as exc:
+                    conn.rollback()
+
+                    results.append(
+                        {
+                            "statement_index": index,
+                            "ok": False,
+                            "type": "error",
+                            "error": str(exc),
+                            "elapsed_ms": round(
+                                (time.perf_counter() - statement_started) * 1000,
+                                3,
+                            ),
+                        }
+                    )
+
+                    return {
+                        "ok": False,
+                        "error": str(exc),
+                        "statement_count": len(statements),
+                        "executed_statements": len(results),
+                        "rolled_back": True,
+                        "results": results,
+                        "elapsed_ms": round(
+                            (time.perf_counter() - total_started) * 1000,
+                            3,
+                        ),
+                    }
+
+                result["elapsed_ms"] = round(
+                    (time.perf_counter() - statement_started) * 1000,
+                    3,
+                )
+
+                results.append(result)
+
+            # ----------------------------------------------------
+            # All statements succeeded
+            # ----------------------------------------------------
+
+            conn.commit()
+
+            return {
+                "ok": True,
+                "statement_count": len(statements),
+                "executed_statements": len(results),
+                "rolled_back": False,
+                "results": results,
+                "elapsed_ms": round(
+                    (time.perf_counter() - total_started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+            return {
+                "ok": False,
+                "error": str(exc),
+                "statement_count": len(statements),
+                "executed_statements": len(results),
+                "rolled_back": True,
+                "results": results,
+                "elapsed_ms": round(
+                    (time.perf_counter() - total_started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            if conn is not None:
+                conn.close()
+
+    async def sql_execute(
+        self,
+        sql: str,
+    ) -> dict:
+        """
+        Execute arbitrary SQLite SQL against the local trading database.
+
+        Multiple SQL statements are supported in one tool call.
+
+        All statements execute sequentially on one connection and inside
+        one transaction.
+
+        If any statement fails, the complete transaction is rolled back.
+
+        Supported:
+        - SELECT
+        - WITH / CTE
+        - PRAGMA
+        - EXPLAIN
+        - INSERT
+        - UPDATE
+        - DELETE
+        - CREATE
+        - ALTER
+        - DROP
+        - RETURNING
+        - multiple SQL statements separated by semicolons
+
+        Prefer targeted SQL queries.
+
+        :param sql: One or more SQLite SQL statements.
+        :return: Per-statement results and execution timing.
+        """
+
+        return await asyncio.to_thread(
+            self._sql_execute_sync,
+            sql,
+        )
+
+    # ============================================================
+    # Database tables
+    # ============================================================
+
+    def _database_tables_sync(self) -> dict:
+        started = time.perf_counter()
+
+        conn = self._connect_readonly()
+
+        try:
+            tables = conn.execute("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """).fetchall()
+
+            result = []
+
+            for row in tables:
+                table_name = row["name"]
+
+                quoted_name = table_name.replace(
+                    '"',
+                    '""',
+                )
+
+                count_row = conn.execute(
+                    f"SELECT COUNT(*) AS count " f'FROM "{quoted_name}"'
+                ).fetchone()
+
+                result.append(
+                    {
+                        "table": table_name,
+                        "rows": count_row["count"],
+                    }
+                )
+
+            return {
+                "ok": True,
+                "table_count": len(result),
+                "tables": result,
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            conn.close()
+
+    async def database_tables(self) -> dict:
+        """
+        Return all SQLite tables and exact row counts.
+        """
+
+        return await asyncio.to_thread(self._database_tables_sync)
+
+    # ============================================================
+    # Complete database schema
+    # ============================================================
+
+    def _database_schema_sync(self) -> dict:
+        started = time.perf_counter()
+
+        conn = self._connect_readonly()
+
+        try:
+            rows = conn.execute("""
+                SELECT
+                    type,
+                    name,
+                    tbl_name,
+                    sql
+                FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%'
+                ORDER BY
+                    CASE type
+                        WHEN 'table' THEN 1
+                        WHEN 'view' THEN 2
+                        WHEN 'index' THEN 3
+                        WHEN 'trigger' THEN 4
+                        ELSE 5
+                    END,
+                    name
+                """).fetchall()
+
+            objects = [self._serialize_row(row) for row in rows]
+
+            return {
+                "ok": True,
+                "object_count": len(objects),
+                "objects": objects,
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            conn.close()
+
+    async def database_schema(self) -> dict:
+        """
+        Return the complete SQLite schema.
+
+        Includes:
+        - tables
+        - views
+        - indexes
+        - triggers
+        """
+
+        return await asyncio.to_thread(self._database_schema_sync)
+
+    # ============================================================
+    # Table information
+    # ============================================================
+
+    def _table_info_sync(
+        self,
+        table_name: str,
+    ) -> dict:
+        started = time.perf_counter()
+
+        conn = self._connect_readonly()
+
+        try:
+            safe_table = table_name.replace(
+                '"',
+                '""',
+            )
+
+            columns = conn.execute(f'PRAGMA table_info("{safe_table}")').fetchall()
+
+            indexes = conn.execute(f'PRAGMA index_list("{safe_table}")').fetchall()
+
+            foreign_keys = conn.execute(
+                f'PRAGMA foreign_key_list("{safe_table}")'
+            ).fetchall()
+
+            return {
+                "ok": True,
+                "table": table_name,
+                "columns": [self._serialize_row(row) for row in columns],
+                "indexes": [self._serialize_row(row) for row in indexes],
+                "foreign_keys": [self._serialize_row(row) for row in foreign_keys],
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            conn.close()
+
+    async def table_info(
+        self,
+        table_name: str,
+    ) -> dict:
+        """
+        Return SQLite metadata for one table.
+
+        Includes:
+        - columns
+        - indexes
+        - foreign keys
+        """
+
+        return await asyncio.to_thread(
+            self._table_info_sync,
+            table_name,
+        )
+
+    # ============================================================
+    # Database status
+    # ============================================================
+
+    def _database_status_sync(self) -> dict:
+        started = time.perf_counter()
+
+        db_path = Path(self.valves.database_path)
+
+        conn = self._connect_readonly()
+
+        try:
+            sqlite_version = conn.execute(
+                "SELECT sqlite_version() AS version"
+            ).fetchone()["version"]
+
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+            foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+
+            busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+            return {
+                "ok": True,
+                "database_path": str(db_path),
+                "database_exists": db_path.exists(),
+                "database_size_bytes": (
+                    db_path.stat().st_size if db_path.exists() else None
+                ),
+                "sqlite_version": sqlite_version,
+                "journal_mode": journal_mode,
+                "foreign_keys": bool(foreign_keys),
+                "busy_timeout_ms": busy_timeout,
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            conn.close()
+
+    async def database_status(self) -> dict:
+        """
+        Return SQLite runtime and database status.
+
+        Includes:
+        - database path
+        - database file size
+        - SQLite version
+        - journal mode
+        - foreign key mode
+        - busy timeout
+        """
+
+        return await asyncio.to_thread(self._database_status_sync)
+
+    # ============================================================
+    # Watchlist ranking (read-only, via trading_analytics.py)
+    # ============================================================
+
+    def _rank_watchlist_sync(self) -> dict:
+        started = time.perf_counter()
+
+        conn: sqlite3.Connection | None = None
+
+        try:
+            analytics = self._load_runtime_trading_module("trading_analytics")
+            conn = self._readonly_import_connection(self.valves.database_path)
+
+            rankings = analytics.rank_watchlist(conn)
+
+            return {
+                "ok": True,
+                "count": len(rankings),
+                "rankings": rankings,
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "elapsed_ms": round(
+                    (time.perf_counter() - started) * 1000,
+                    3,
+                ),
+            }
+
+        finally:
+            if conn is not None:
+                conn.close()
+
+    async def rank_watchlist(self) -> dict:
+        """
+        Rank watchlist securities (status='WATCH') by a technical
+        momentum/trend score.
+
+        Delegates to the read-only trading_analytics.py library
+        (SMA50/SMA200, RSI14, 1M/3M/6M performance, 52-week
+        drawdown, annualized volatility) against the same local
+        trading database. No writes, no web access.
+
+        :return: {"ok": true, "count": <n>, "rankings": [...]}
+        """
+
+        return await asyncio.to_thread(self._rank_watchlist_sync)
+
+    # ============================================================
+    # Portfolio-level read-only orchestration
+    # ============================================================
+
+    def _run_trading_orchestrator_sync(self, as_of: str | None) -> dict:
+        orchestrator = self._load_runtime_trading_module("trading_orchestrator")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return orchestrator.run_trading_orchestrator(conn, as_of=as_of).primitive()
+        finally:
+            conn.close()
+
+    async def run_trading_orchestrator(self, as_of: str | None = None) -> dict:
+        """Return one read-only, portfolio-level recommendation report.
+
+        Current evaluation is used when ``as_of`` is omitted.  This operation
+        only composes existing decisions, sizing, lifecycle, and promotion
+        diagnostics; it cannot import data, create assignments/campaigns, or
+        execute orders.
+
+        The default answer (detail=false) is a structured status:
+        portfolio, positions, position_engine (SELL/TRIM/HOLD/ADD of
+        existing positions), promotion, entry_plan (planner: planned and
+        deferred NEW entries), proceeds (gross/tax/net) and capital. Use
+        these figures as they are; do not recount, recompute totals or
+        derive a new recommendation. detail=true returns the complete
+        result incl. presentation_summary and rendered_summary_de.
+        """
+        try:
+            result = await asyncio.to_thread(self._run_trading_orchestrator_sync, as_of)
+            return {"ok": True, "operation": "run_trading_orchestrator", "result": result}
+        except Exception as exc:
+            return {"ok": False, "operation": "run_trading_orchestrator", "error": "ORCHESTRATOR_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Swing candidate promotion (fixed safe operations only)
+    # ============================================================
+
+    def _evaluate_swing_candidate_sync(self, security_id: int) -> dict:
+        promotion = self._load_runtime_trading_module("swing_promotion")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return promotion.evaluate_swing_promotion(conn, int(security_id)).primitive()
+        finally:
+            conn.close()
+
+    def _evaluate_swing_candidates_sync(self) -> list[dict]:
+        promotion = self._load_runtime_trading_module("swing_promotion")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return [item.primitive() for item in promotion.evaluate_swing_candidates(conn)]
+        finally:
+            conn.close()
+
+    def _approve_swing_promotion_sync(
+        self, security_id: int, plan_token: str, effective_from: str, approved_by: str
+    ) -> dict:
+        promotion = self._load_runtime_trading_module("swing_promotion")
+        conn = self._connect()
+        try:
+            return promotion.approve_swing_promotion(
+                conn,
+                security_id=int(security_id),
+                plan_token=plan_token,
+                effective_from=effective_from,
+                approved_by=approved_by,
+            )
+        finally:
+            conn.close()
+
+    async def evaluate_swing_candidate(self, security_id: int) -> dict:
+        """Read-only promotion evaluation for one generic WATCH security.
+
+        This evaluates the fixed promotion rules only.  It cannot assign a
+        strategy, create a campaign, recommend a BUY, or execute a trade.
+        """
+        try:
+            decision = await asyncio.to_thread(self._evaluate_swing_candidate_sync, security_id)
+            return {"ok": True, "operation": "evaluate_swing_candidate", "decision": decision}
+        except Exception as exc:
+            return {"ok": False, "operation": "evaluate_swing_candidate", "error": "PROMOTION_EVALUATION_FAILED", "message": str(exc)}
+
+    async def evaluate_swing_candidates(self) -> dict:
+        """Read-only evaluation of zero-position generic WATCH securities."""
+        try:
+            decisions = await asyncio.to_thread(self._evaluate_swing_candidates_sync)
+            counts = {"PROMOTE": 0, "KEEP_WATCHING": 0, "REJECT": 0, "DATA_INSUFFICIENT": 0}
+            for decision in decisions:
+                counts[decision["recommendation"]] += 1
+            return {"ok": True, "operation": "evaluate_swing_candidates", "count": len(decisions), "counts": counts, "decisions": decisions}
+        except Exception as exc:
+            return {"ok": False, "operation": "evaluate_swing_candidates", "error": "PROMOTION_EVALUATION_FAILED", "message": str(exc)}
+
+    async def approve_swing_promotion(
+        self,
+        security_id: int,
+        plan_token: str,
+        effective_from: str,
+        __user__: dict | None = None,
+    ) -> dict:
+        """Apply one explicitly approved, still-current PROMOTE plan.
+
+        Call only after the user approved the returned token.  The operation
+        accepts no strategy, quantity, price, SQL, or campaign parameters.
+        It re-evaluates current state before inserting one `swing` assignment.
+        """
+        approved_by = str((__user__ or {}).get("id") or "mcp")
+        try:
+            result = await asyncio.to_thread(
+                self._approve_swing_promotion_sync,
+                security_id,
+                plan_token,
+                effective_from,
+                approved_by,
+            )
+            return {"ok": True, "operation": "approve_swing_promotion", **result}
+        except Exception as exc:
+            return {"ok": False, "operation": "approve_swing_promotion", "error": "PROMOTION_APPROVAL_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Strategy suggestion & candidate decision (read-only)
+    # ============================================================
+
+    def _suggest_strategy_assignments_sync(self, as_of: str | None) -> list[dict]:
+        suggestion = self._load_runtime_trading_module("strategy_suggestion")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return [item.primitive() for item in suggestion.suggest_strategy_assignments(conn, as_of=as_of)]
+        finally:
+            conn.close()
+
+    def _evaluate_watchlist_candidates_sync(self, as_of: str | None) -> list[dict]:
+        decision = self._load_runtime_trading_module("candidate_decision")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return [item.primitive() for item in decision.evaluate_watchlist_candidates(conn, as_of=as_of)]
+        finally:
+            conn.close()
+
+    async def suggest_strategy_assignments(self, as_of: str | None = None) -> dict:
+        """Read-only swing/long_term/unknown strategy suggestion per WATCH entry.
+
+        Only covers watchlist entries that currently have no active
+        strategy_assignment; entries that already have one are skipped
+        entirely by strategy_suggestion.py, never overridden. A suggestion is
+        not an assignment: this call never writes strategy_assignment. It
+        delegates entirely to the existing strategy_suggestion.py module; no
+        suggestion logic lives in this tool. Current evaluation is used when
+        as_of is omitted.
+        """
+        try:
+            suggestions = await asyncio.to_thread(self._suggest_strategy_assignments_sync, as_of)
+            counts = {"swing": 0, "long_term": 0, "unknown": 0}
+            for item in suggestions:
+                counts[item["suggested_strategy"]] += 1
+            return {"ok": True, "operation": "suggest_strategy_assignments", "count": len(suggestions), "counts": counts, "suggestions": suggestions}
+        except Exception as exc:
+            return {"ok": False, "operation": "suggest_strategy_assignments", "error": "STRATEGY_SUGGESTION_FAILED", "message": str(exc)}
+
+    async def evaluate_watchlist_candidates(self, as_of: str | None = None) -> dict:
+        """Read-only BUY/WATCH/DEFERRED/INSUFFICIENT_DATA status per WATCH entry.
+
+        Combines analytics score/quality, active strategy assignment, open
+        Swing campaign status, and the current portfolio allocation
+        guardrails. It delegates entirely to the existing
+        candidate_decision.py module; no decision logic lives in this tool.
+        Never opens a Swing campaign, never persists a decision, never places
+        an order. Current evaluation is used when as_of is omitted.
+        """
+        try:
+            decisions = await asyncio.to_thread(self._evaluate_watchlist_candidates_sync, as_of)
+            counts = {"BUY": 0, "WATCH": 0, "DEFERRED": 0, "INSUFFICIENT_DATA": 0}
+            for item in decisions:
+                counts[item["decision_status"]] += 1
+            return {"ok": True, "operation": "evaluate_watchlist_candidates", "count": len(decisions), "counts": counts, "decisions": decisions}
+        except Exception as exc:
+            return {"ok": False, "operation": "evaluate_watchlist_candidates", "error": "CANDIDATE_DECISION_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Candidate discovery report (read-only, file only)
+    # ============================================================
+
+    def _discovery_report_directory(self) -> Path:
+        configured = str(self.valves.discovery_report_dir or "").strip()
+        if configured:
+            return Path(configured)
+        return Path(self.valves.database_path).parent / "candidate-discovery"
+
+    def _get_candidate_discovery_sync(self, status: str, limit: int, detail: bool, symbol: str | None) -> dict:
+        report_module = self._load_runtime_trading_module("discovery_report")
+        directory = self._discovery_report_directory()
+        report, reason, problems = report_module.read_latest_report(directory)
+        if report is None:
+            return report_module.unavailable(reason, directory, problems)
+        return report_module.query_report(report, status=status, limit=limit, detail=detail, symbol=symbol)
+
+    async def get_candidate_discovery(
+        self,
+        status: str = "ALL",
+        limit: int = 20,
+        detail: bool = False,
+        symbol: str | None = None,
+    ) -> dict:
+        """Last finished watchlist-discovery report (read-only: no scan, no web, no DB). New candidates, not PROMOTE/BUY.
+
+        :param status: ALL, DISCOVERY_READY, DISCOVERY_WATCH, DISCOVERY_DATA_INSUFFICIENT, DISCOVERY_REJECTED or EXCLUDED (pre-filter)
+        :param limit: rows (default 20; max 150, detail 40)
+        :param detail: true = all stored fields
+        :param symbol: explain one symbol
+        Returns AVAILABLE (freshness, REPORT_STALE flag) or UNAVAILABLE (NO_DISCOVERY_REPORT).
+        """
+        try:
+            return await asyncio.to_thread(self._get_candidate_discovery_sync, status, int(limit), bool(detail), symbol)
+        except Exception as exc:
+            return {"ok": False, "operation": "get_candidate_discovery", "error": "DISCOVERY_REPORT_READ_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Market intelligence report (read-only, file only)
+    # ============================================================
+
+    def _market_intelligence_report_directory(self) -> Path:
+        configured = str(self.valves.market_intelligence_report_dir or "").strip()
+        if configured:
+            return Path(configured)
+        return Path(self.valves.database_path).parent / "market-intelligence"
+
+    def _get_market_intelligence_sync(self, scope: str, category: str | None, importance: str | None, symbol: str | None,
+                                      sector: str | None, limit: int, detail: bool) -> dict:
+        report_module = self._load_runtime_trading_module("intelligence_report")
+        directory = self._market_intelligence_report_directory()
+        report, reason, problems = report_module.read_latest_report(directory)
+        if report is None:
+            return report_module.unavailable(reason, directory, problems)
+        return report_module.query_report(report, scope=scope, category=category, importance=importance, symbol=symbol,
+                                          sector=sector, limit=limit, detail=detail)
+
+    async def get_market_intelligence(
+        self,
+        scope: str = "ALL",
+        category: str | None = None,
+        importance: str | None = None,
+        symbol: str | None = None,
+        sector: str | None = None,
+        limit: int = 20,
+        detail: bool = False,
+    ) -> dict:
+        """Last finished market-intelligence report: classified macro and company news (read-only: no web, no scan, no DB).
+        News is context, not a signal; impact is UNKNOWN unless a primary filing states an adverse fact.
+        For a normal symbol news question the compact result is sufficient: pass only symbol and omit every optional parameter whose default suffices.
+
+        :param scope: default ALL (do not set it explicitly); PORTFOLIO, WATCHLIST, DISCOVERY or MACRO to narrow
+        :param category: MACRO, MONETARY_POLICY, INFLATION, LABOR_MARKET, ECONOMIC_GROWTH, GEOPOLITICS, ENERGY, SECTOR, COMPANY, EARNINGS, GUIDANCE, REGULATORY, M_AND_A
+        :param importance: HIGH, MEDIUM or LOW
+        :param symbol: e.g. NVDA or SAP (matches SAP.DE)
+        :param sector: e.g. SEMICONDUCTORS, ENERGY
+        :param limit: events (default 20; max 50, detail 25); set only if a specific count is required
+        :param detail: true = raw dump of all stored fields and substantially larger output; use only when the user explicitly requests detailed/raw data or the compact result lacks information required to answer the question
+        Returns AVAILABLE (freshness, REPORT_STALE flag) or UNAVAILABLE (NO_MARKET_INTELLIGENCE_REPORT).
+        """
+        try:
+            return await asyncio.to_thread(self._get_market_intelligence_sync, scope, category, importance, symbol, sector, int(limit), bool(detail))
+        except Exception as exc:
+            return {"ok": False, "operation": "get_market_intelligence", "error": "MARKET_INTELLIGENCE_READ_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Unified opportunity view (read-only: orchestrator + two report files)
+    # ============================================================
+
+    def _get_opportunity_view_sync(self, source: str, status: str, news_status: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False) -> dict:
+        view_module = self._load_runtime_trading_module("opportunity_view")
+        discovery_module = self._load_runtime_trading_module("discovery_report")
+        intelligence_module = self._load_runtime_trading_module("intelligence_report")
+        engine, engine_error, symbol_map, alias_index = None, None, {}, None
+        try:
+            orchestrator = self._load_runtime_trading_module("trading_orchestrator")
+            conn = self._readonly_import_connection(self.valves.database_path)
+            try:
+                engine = orchestrator.run_trading_orchestrator(conn).primitive()
+                symbol_map = view_module.load_symbol_map(conn)
+                alias_index = view_module.load_alias_index(conn)
+            finally:
+                conn.close()
+        except Exception as exc:
+            engine, engine_error = None, f"{type(exc).__name__}: {exc}"
+        discovery, discovery_reason, _ = discovery_module.read_latest_report(self._discovery_report_directory())
+        intelligence, intelligence_reason, _ = intelligence_module.read_latest_report(self._market_intelligence_report_directory())
+        view = view_module.build_opportunity_view(
+            engine=engine, symbol_map=symbol_map, discovery=discovery, discovery_reason=discovery_reason,
+            mi=intelligence, mi_reason=intelligence_reason, engine_error=engine_error, alias_index=alias_index,
+        )
+        if view["metadata"]["status"] == "UNAVAILABLE":
+            return view_module.unavailable({"engine": engine_error, "discovery": discovery_reason, "market_intelligence": intelligence_reason})
+        return view_module.query_view(view, source=source, status=status, news_status=news_status, symbol=symbol, limit=limit, detail=detail)
+
+    async def get_opportunity_view(
+        self,
+        source: str = "ALL",
+        status: str = "ALL",
+        news_status: str | None = None,
+        symbol: str | None = None,
+        limit: int = 30,
+        detail: bool = False,
+    ) -> dict:
+        """Opportunities = engine/planner candidates + last discovery report, each with a news-context status
+        (read-only: no web, no scan, no DB write, no order). Joins existing results; news never changes a score, rank, size or decision.
+        One filtered call is normally enough; detail only when explicitly needed.
+
+        :param source: ALL, WATCHLIST, DISCOVERY or BOTH
+        :param status: ALL, ENTRY_READY, WAIT_FOR_TRIGGER, DISCOVERY_READY or OTHER
+        :param news_status: NEWS_HIGH_ATTENTION, NEWS_ATTENTION, NEWS_CLEAR, NEWS_UNAVAILABLE, RELEVANT (attention or high) or NOT_HIGH
+        :param symbol: one or comma-separated, e.g. NVDA,AAPL (also shows held positions)
+        :param limit: rows (default 30; max 40, detail 10)
+        :param detail: true = all fields incl. macro, positions, methodology
+        Returns rows with entry rank/score, plan status and capital, news status and top event; PARTIAL if a report is missing.
+        """
+        try:
+            return await asyncio.to_thread(self._get_opportunity_view_sync, source, status, news_status, symbol, int(limit), bool(detail))
+        except Exception as exc:
+            return {"ok": False, "operation": "get_opportunity_view", "error": "OPPORTUNITY_VIEW_FAILED", "message": str(exc)}
+
+    # ============================================================
+    # Watchlist: get_watchlist reads; the three other operations are narrow writes to the watchlist table only
+    # ============================================================
+
+    @staticmethod
+    def _optional(compute):
+        """One optional input of the watchlist view: a failure means 'not available' (reported as a warning), never a failed tool."""
+        try:
+            return compute()
+        except Exception:
+            return None
+
+    def _get_watchlist_sync(self, status: str | None, strategy: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False) -> dict:
+        view_module = self._load_runtime_trading_module("watchlist_view")
+        opportunity = self._load_runtime_trading_module("opportunity_view")
+        analytics = self._load_runtime_trading_module("trading_analytics")
+        decisions_module = self._load_runtime_trading_module("candidate_decision")
+        intelligence_module = self._load_runtime_trading_module("intelligence_report")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            rows = view_module.load_rows(conn, date.today().isoformat())
+            ranking = self._optional(lambda: analytics.rank_watchlist(conn))
+            decisions = self._optional(lambda: [item.primitive() for item in decisions_module.evaluate_watchlist_candidates(conn)])
+            engine = self._optional(lambda: self._load_runtime_trading_module("trading_orchestrator").run_trading_orchestrator(conn).primitive())
+            symbol_map, alias_index = opportunity.load_symbol_map(conn), opportunity.load_alias_index(conn)
+        finally:
+            conn.close()
+        intelligence, _reason, _ = intelligence_module.read_latest_report(self._market_intelligence_report_directory())
+        sector_layers = self._optional(lambda: self._load_runtime_trading_module("sector_assignment").read_layers())  # a missing or broken map only leaves the sectors empty
+        view = view_module.build_watchlist(rows=rows, ranking=ranking, decisions=decisions, engine=engine, mi=intelligence, symbol_map=symbol_map, alias_index=alias_index,
+                                           sector_layers=sector_layers)
+        return view_module.query_watchlist(view, status=status, strategy=strategy, symbol=symbol, limit=limit, detail=detail, table=table)
+
+    async def get_watchlist(
+        self,
+        status: str | None = None,
+        strategy: str | None = None,
+        symbol: str | None = None,
+        limit: int = 150,
+        detail: bool = False,
+        table: bool = False,
+    ) -> dict:
+        """Every watchlist entry with security data, strategy, priority, rank, score, data quality, candidate decision, entry status and news status
+        (read-only: no web, no scan, no DB write, no order; joins the existing ranking, decision, planner and news results and computes nothing new).
+
+        :param status: watchlist status, e.g. WATCH
+        :param strategy: swing, long_term or NONE (no active strategy assignment)
+        :param symbol: one or comma-separated symbols, ISINs or WKNs
+        :param limit: rows (default 150, max 200)
+        :param detail: true = complete rows (at most 10), only for diagnosis
+        :param table: true = the row shape of the desktop GUI table (ids, ISIN, dates, notes flag); chat and LLM clients leave it false
+        The default answer is compact: a summary (counts by strategy, status, data quality, news) plus a few fields per entry; absent fields have no value.
+        Rows are ordered by rank (scored entries first), then priority (higher first), then symbol.
+        """
+        try:
+            return await asyncio.to_thread(self._get_watchlist_sync, status, strategy, symbol, int(limit), bool(detail), bool(table))
+        except Exception as exc:
+            return {"ok": False, "operation": "get_watchlist", "error": "WATCHLIST_VIEW_FAILED", "message": str(exc)}
+
+    def _get_sector_overview_sync(self, as_of: str | None, lookthrough: bool = True) -> dict:
+        overview = self._load_runtime_trading_module("sector_overview")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return overview.public_payload(overview.build_sector_overview(conn, as_of=as_of, lookthrough=bool(lookthrough)))
+        finally:
+            conn.close()
+
+    async def get_sector_overview(self, as_of: str | None = None, lookthrough: bool = True) -> dict:
+        """The open positions grouped by sector (read-only: no web, no DB write, no order, no change to any guard).
+
+        Per sector: EUR market value, share of the invested value, number of positions, value-weighted daily change, the sector-guard limit and status
+        (OK / OVER_LIMIT / NOT_ASSESSED); per position: value, weight, daily change, ETF flag. Positions without a sector entry form their own
+        group (sector null, "not assigned"). ETFs with an official provider sector allocation are split into their sector categories (origin
+        etf_lookthrough, next to the direct stocks); categories that fit no single sector group and ETFs without allocation data stay visible as
+        their own entries. The risk guard is not changed by this view. Use the figures as they are.
+
+        :param as_of: evaluation date YYYY-MM-DD (default: current)
+        :param lookthrough: true (default) = split ETFs into their sector allocation; false = every ETF stays one position
+        """
+        try:
+            return await asyncio.to_thread(self._get_sector_overview_sync, as_of, lookthrough)
+        except Exception as exc:
+            return {"ok": False, "operation": "get_sector_overview", "error": "SECTOR_OVERVIEW_FAILED", "message": str(exc)}
+
+    def _get_effective_exposure_sync(self, as_of: str | None, top: int) -> dict:
+        exposure = self._load_runtime_trading_module("effective_exposure")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return exposure.build_effective_exposure(conn, as_of=as_of, top=top)
+        finally:
+            conn.close()
+
+    async def get_effective_exposure(self, as_of: str | None = None, top: int = 25) -> dict:
+        """Effective single-name exposure of the open positions (read-only: no web, no DB write, no order, no change to any guard).
+
+        Per company: direct EUR value and weight + the share of the same company in every held ETF (the provider's holdings; a synthetic ETF uses its index
+        composition) = effective value and weight, and which ETFs contribute. A company held directly and in ETFs is counted once. Holdings are matched to
+        securities by ISIN, a reviewed alias or an exact ticker and exchange (never fuzzy); unmatched holdings stay companies of their own. Also the coverage per
+        ETF (holdings, equity weight, matched, other/cash, as-of date, source) and reconciliation checks. Use the figures as they are.
+
+        :param as_of: evaluation date YYYY-MM-DD (default: current)
+        :param top: number of companies returned, largest effective exposure first (default 25, at most 40)
+        """
+        try:
+            return await asyncio.to_thread(self._get_effective_exposure_sync, as_of, max(1, min(int(top), 40)))
+        except Exception as exc:
+            return {"ok": False, "operation": "get_effective_exposure", "error": "EFFECTIVE_EXPOSURE_FAILED", "message": str(exc)}
+
+    def _get_data_freshness_sync(self) -> dict:
+        freshness = self._load_runtime_trading_module("data_freshness")
+        discovery = self._load_runtime_trading_module("discovery_report")
+        intelligence = self._load_runtime_trading_module("intelligence_report")
+        conn = self._readonly_import_connection(self.valves.database_path)
+        try:
+            return freshness.build_data_freshness(conn, discovery_module=discovery, intelligence_module=intelligence, discovery_dir=self._discovery_report_directory(),
+                                                  intelligence_dir=self._market_intelligence_report_directory())
+        finally:
+            conn.close()
+
+    async def get_data_freshness(self) -> dict:
+        """The age of the data the scheduled tasks produce (read-only: no web, no DB write, no task is started).
+
+        Per source the facts the data carry: market data (latest daily bar, oldest latest bar of a held position, last fetch), FX rates (latest rate date, oldest currency,
+        last fetch), news and SEC events (last fetch, latest article, latest event), fundamentals (last fetch, period end, filing date) and the generated_at / evaluation
+        date of the last finished candidate-discovery and market-intelligence report (written only after a complete run). The existing age rules are returned in
+        rules. Facts only, no verdict; the Windows Task Scheduler state is a separate source.
+        """
+        try:
+            return await asyncio.to_thread(self._get_data_freshness_sync)
+        except Exception as exc:
+            return {"ok": False, "operation": "get_data_freshness", "error": "DATA_FRESHNESS_FAILED", "message": str(exc)}
+
+    def _watchlist_write_sync(self, operation: str, *args, **kwargs) -> dict:
+        admin = self._load_runtime_trading_module("watchlist_admin")
+        conn = self._connect()
+        try:
+            conn.execute("PRAGMA busy_timeout=5000;")  # the scheduled collectors write too; wait a few seconds instead of failing at once
+            return getattr(admin, operation)(conn, *args, **kwargs)
+        finally:
+            conn.close()
+
+    async def _watchlist_write(self, operation: str, *args, **kwargs) -> dict:
+        try:
+            return await asyncio.to_thread(self._watchlist_write_sync, operation, *args, **kwargs)
+        except Exception as exc:
+            return {"ok": False, "operation": operation, "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
+
+    async def add_watchlist_candidate(self, identifier: str, priority: int | None = None, dry_run: bool = False) -> dict:
+        """ACTION (writes only the watchlist table): add a security that is ALREADY in the Security Master to the watchlist (status WATCH).
+
+        The identifier is resolved deterministically (security_id, ISIN, WKN, exact symbol/alias, symbol stem, exact company name); there is no
+        fuzzy search and a security is never created.  Results: ADDED, ALREADY_EXISTS, SECURITY_NOT_FOUND, AMBIGUOUS_IDENTIFIER,
+        INVALID_IDENTIFIER, INVALID_PRIORITY, ERROR.  dry_run=true only resolves (WOULD_ADD) and writes nothing.
+
+        :param identifier: security_id, ISIN, WKN, symbol or alias, or the exact full company name
+        :param priority: optional whole number (higher ranks first, as in the planner tie-break)
+        :param dry_run: true = resolve only, no write
+        """
+        return await self._watchlist_write("add_watchlist_candidate", identifier, priority, dry_run=bool(dry_run))
+
+    async def remove_watchlist_candidate(self, security_id: int) -> dict:
+        """ACTION (writes only the watchlist table): remove one security from the watchlist.
+
+        Only the watchlist row is deleted; a held position, its strategy assignment and its campaigns stay untouched.
+        Results: REMOVED, NOT_FOUND, INVALID_IDENTIFIER, ERROR.
+        """
+        return await self._watchlist_write("remove_watchlist_candidate", security_id)
+
+    async def set_watchlist_priority(self, security_id: int, priority: int | None) -> dict:
+        """ACTION (writes only the watchlist table): set the priority of one watchlist entry (a whole number, higher ranks first; null clears it).
+
+        Results: PRIORITY_SET, NOT_FOUND, INVALID_IDENTIFIER, INVALID_PRIORITY, ERROR.
+        """
+        return await self._watchlist_write("set_watchlist_priority", security_id, priority)
+
+    def _set_security_sector_sync(self, security_id, sector) -> dict:
+        assignment = self._load_runtime_trading_module("sector_assignment")
+        conn = self._connect()
+        try:
+            conn.execute("PRAGMA busy_timeout=5000;")
+            return assignment.set_security_sector(conn, security_id, sector)
+        finally:
+            conn.close()
+
+    async def set_security_sector(self, security_id: int, sector: str | None) -> dict:
+        """ACTION (writes only the local sector map sector_map_local.json, never the database; for the desktop GUI only): set or remove the local sector entry of ONE security.
+
+        sector must be an EXISTING sector group (of sector_map_v1.json or of the local map) or null: null removes the local entry, so the public sector
+        applies again (or none); a sector equal to the public one also just removes the local entry. A held position or an open campaign does not block it
+        (a classification, not a lifecycle change). Results: SECTOR_SET, SECTOR_OVERRIDE_REMOVED, UNCHANGED, NOT_FOUND, INVALID_IDENTIFIER, INVALID_SECTOR,
+        NO_MAP_KEY, SECTOR_MAP_UNAVAILABLE, LOCAL_MAP_INVALID, ERROR. sector_map_v1.json is never changed; the previous local file is kept as .bak.
+
+        :param security_id: the security_id of the Security Master
+        :param sector: an existing sector group, or null to remove the local entry
+        """
+        try:
+            return await asyncio.to_thread(self._set_security_sector_sync, security_id, sector)
+        except Exception as exc:
+            return {"ok": False, "operation": "set_security_sector", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
+
+    def _set_security_strategy_sync(self, security_id, strategy) -> dict:
+        admin = self._load_runtime_trading_module("strategy_admin")
+        conn = self._connect()
+        try:
+            conn.execute("PRAGMA busy_timeout=5000;")  # the scheduled collectors write too; wait a few seconds instead of failing at once
+            return admin.set_security_strategy(conn, security_id, strategy)
+        finally:
+            conn.close()
+
+    async def set_security_strategy(self, security_id: int, strategy: str | None) -> dict:
+        """ACTION (writes only strategy_assignment; for the desktop GUI only): set the strategy of ONE security that is not held, or remove it.
+
+        strategy is swing, long_term or null (= remove the active assignment). Blocked without any write: a currently held position
+        (BLOCKED_HELD_POSITION) and a security with an open swing campaign (BLOCKED_ACTIVE_CAMPAIGN). Other results: STRATEGY_SET, STRATEGY_REMOVED,
+        UNCHANGED (already so), NOT_FOUND, INVALID_IDENTIFIER, INVALID_STRATEGY, ASSIGNMENT_HISTORY_UNCLEAR, ERROR. No campaign is opened or closed,
+        no position, watchlist row, promotion or order is touched. A not held swing security becomes an entry candidate of the planner (simulation only).
+
+        :param security_id: the security_id of the Security Master
+        :param strategy: swing, long_term or null to remove the strategy
+        """
+        try:
+            return await asyncio.to_thread(self._set_security_strategy_sync, security_id, strategy)
+        except Exception as exc:
+            return {"ok": False, "operation": "set_security_strategy", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
+
+    def _onboard_security_sync(self, **arguments) -> dict:
+        onboarding = self._load_runtime_trading_module("security_onboarding")
+        conn = self._connect()
+        try:
+            conn.execute("PRAGMA busy_timeout=5000;")  # the scheduled collectors write too; wait a few seconds instead of failing at once
+            return onboarding.onboard_security(conn, **arguments)
+        finally:
+            conn.close()
+
+    async def onboard_security(
+        self,
+        symbol: str,
+        name: str,
+        asset_type: str,
+        isin: str | None = None,
+        wkn: str | None = None,
+        exchange: str | None = None,
+        currency: str | None = None,
+        country: str | None = None,
+        provider_symbols: dict[str, str] | None = None,
+        add_to_watchlist: bool = False,
+        watchlist_priority: int | None = None,
+        dry_run: bool = True,
+    ) -> dict:
+        """ACTION (creates ONE new security in the Security Master; for the desktop GUI only): nothing is looked up or guessed, every value comes from the caller.
+
+        dry_run=true (the default) validates the input and checks it against the Security Master (ISIN, symbol, WKN, provider symbols) and writes
+        nothing: READY, ALREADY_EXISTS, ISIN_CONFLICT, SYMBOL_CONFLICT, WKN_CONFLICT, ALIAS_CONFLICT or INVALID_INPUT (all conflicts are listed).
+        dry_run=false repeats the checks and then creates, in ONE transaction, the security, the optional provider symbols and the optional
+        watchlist entry (CREATED); any error rolls everything back. No position, strategy, campaign, order, market data, fundamentals or news is
+        written or started, and no sector is assigned. An existing security is never changed.
+
+        :param symbol: public symbol exactly as it should be stored (no exchange suffix is added)
+        :param name: descriptive security name
+        :param asset_type: stock or etf (no default)
+        :param isin: optional, syntax and check digit are validated
+        :param wkn: optional, six characters
+        :param exchange: optional free text
+        :param currency: optional ISO 4217 code, three letters
+        :param country: optional ISO 3166 code, two letters
+        :param provider_symbols: optional {"Yahoo Finance": "XYZ.DE", "FMP": "XYZ"}; stored as source symbols
+        :param add_to_watchlist: true = also add the new security to the watchlist (status WATCH), in the same transaction
+        :param watchlist_priority: optional whole number, only together with add_to_watchlist
+        :param dry_run: true = check only (default), false = create
+        """
+        arguments = dict(symbol=symbol, name=name, asset_type=asset_type, isin=isin, wkn=wkn, exchange=exchange, currency=currency, country=country,
+                         provider_symbols=provider_symbols, add_to_watchlist=add_to_watchlist, watchlist_priority=watchlist_priority, dry_run=dry_run)
+        try:
+            return await asyncio.to_thread(self._onboard_security_sync, **arguments)
+        except Exception as exc:
+            return {"ok": False, "operation": "onboard_security", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
+
+    def _transaction_import_sync(self, write: bool, file_path: str, format: str, create_securities: bool, include_historical: bool,
+                                 strategies: list[str] | None, campaign_opened_at: list[str] | None, plan_token: str | None, accept_aliases: list[str] | None = None,
+                                 start_campaigns: bool = True) -> dict:
+        workflow = self._load_runtime_trading_module("import_workflow")
+        if format not in ("parqet", "canonical"):
+            raise ValueError("format must be parqet or canonical")
+        path = workflow.validate_source_file(file_path)
+        common = dict(fmt=format, create_securities=bool(create_securities), strategies=list(strategies or []), campaign_opened_at=list(campaign_opened_at or []),
+                      include_historical=bool(include_historical), accept_aliases=list(accept_aliases or []), start_campaigns=bool(start_campaigns))
+        if write:
+            return workflow.compact(workflow.run(self.valves.database_path, path, expected_plan_token=plan_token, **common))
+        return workflow.compact(workflow.check(self.valves.database_path, path, **common))
+
+    async def check_transaction_import(
+        self,
+        file_path: str,
+        format: str = "parqet",
+        create_securities: bool = False,
+        include_historical: bool = False,
+        strategies: list[str] | None = None,
+        campaign_opened_at: list[str] | None = None,
+        accept_aliases: list[str] | None = None,
+        start_campaigns: bool = True,
+    ) -> dict:
+        """ACTION class (for the desktop GUI only; reads a local CSV, writes nothing): the complete dry run of a transaction export.
+
+        Analyses the file, compares it with the database and returns ONE report: the difference (new securities, supplemented master data, master data
+        conflicts, new / existing transactions, rows with a problem, expected position changes), the planned end state (open items) and the reconciliation of
+        the file against the simulated end state (counts, portfolio value, net shares file against positions, integrity_check, foreign_key_check). The real
+        database is opened read-only; the import is simulated on an in-memory copy. plan_token is what import_transactions needs.
+
+        :param file_path: path of a local .csv file (Parqet export or the canonical CSV)
+        :param format: parqet (default) or canonical
+        :param create_securities: true = securities that are not in the Security Master are created from the file (ISIN, WKN, name; nothing is looked up or invented)
+        :param include_historical: true = also import rows older than the latest stored transaction
+        :param strategies: optional list of "SYMBOL=swing" or "SYMBOL=long_term" for held positions without an assignment
+        :param campaign_opened_at: optional list of "SYMBOL=YYYY-MM-DD" when a Swing campaign start cannot be derived
+        :param accept_aliases: optional list of "IDENTIFIER=SYMBOL": the identifier (ISIN) of the file IS that existing security (ADR / GDR / other listing); needs the same WKN on both sides
+        :param start_campaigns: false = no Swing campaign is derived and started automatically (the open item says so); an explicit start date in campaign_opened_at still starts one
+        """
+        try:
+            return await asyncio.to_thread(self._transaction_import_sync, False, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, None, accept_aliases, start_campaigns)
+        except Exception as exc:
+            return {"ok": False, "operation": "check_transaction_import", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:300]}
+
+    async def import_transactions(
+        self,
+        file_path: str,
+        plan_token: str,
+        format: str = "parqet",
+        create_securities: bool = False,
+        include_historical: bool = False,
+        strategies: list[str] | None = None,
+        campaign_opened_at: list[str] | None = None,
+        accept_aliases: list[str] | None = None,
+        start_campaigns: bool = True,
+    ) -> dict:
+        """ACTION (writes the database; for the desktop GUI only): import a transaction export in ONE transaction, after check_transaction_import.
+
+        plan_token must be the token of a check with the same file and options; it is refused when the file or the database changed since. A backup of the database
+        is made first. In one transaction: new securities (central create path, values from the file only), supplemented master data (empty ISIN / WKN only, nothing
+        is overwritten), new transactions (duplicates are skipped, so the same file twice changes nothing), the positions of the touched securities (rebuilt through the
+        existing rebuild), and strategy / campaign handling only as the explicit import rules say. Any error rolls everything back. Watchlist, strategy assignments and
+        campaigns are not changed because a position was imported. Afterwards the file is reconciled against the database (counts, value, shares, integrity, foreign keys).
+        Prices, FX rates and cash are not part of it.
+
+        :param file_path: the same local .csv file as in the check
+        :param plan_token: plan_token of check_transaction_import
+        :param format: parqet (default) or canonical
+        :param create_securities: same value as in the check
+        :param include_historical: same value as in the check
+        :param strategies: same value as in the check
+        :param campaign_opened_at: same value as in the check
+        :param accept_aliases: same value as in the check
+        :param start_campaigns: same value as in the check
+        """
+        try:
+            if not plan_token:
+                raise ValueError("plan_token is required (run check_transaction_import first)")
+            return await asyncio.to_thread(self._transaction_import_sync, True, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, plan_token, accept_aliases, start_campaigns)
+        except Exception as exc:
+            return {"ok": False, "operation": "import_transactions", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:300]}
+
+    # ============================================================
+    # Runtime helper loading and read-only connection
+    # ============================================================
+
+    # Shared across every Tools() instance created from this loaded module,
+    # so a runtime helper is exec'd at most once per process (restart the
+    # MCP server to pick up changed runtime helper files).
+    _runtime_module_cache: dict[str, Any] = {}
+
+    @staticmethod
+    def _runtime_tools_directory() -> Path:
+        """The folder of the trading helpers that belong to THIS server: ``app`` next to this tool's
+        folder (the deployed ``C:\\tools\\trading\\mcp`` and the pip installation ``viper_ai/mcp``),
+        ``tools/trading`` in a repository checkout; only otherwise ``<trading root>\\app``
+        (``VIPER_TRADING_ROOT``, default ``C:\\tools\\trading``).  A checkout or a pip installation
+        never silently runs the helpers of another (older) deployed copy."""
+        here = Path(__file__).resolve().parent
+        for candidate in (here.parent / "app", here.parent / "tools" / "trading"):
+            if (candidate / "trading_orchestrator.py").is_file():
+                return candidate
+        root = os.environ.get("VIPER_TRADING_ROOT", "").strip()
+        return (Path(root) if root else Path(r"C:\tools\trading")) / "app"
+
+    @classmethod
+    def _load_runtime_trading_module(cls, module_name: str):
+        """Load one deployed trading helper without accepting a caller path.
+
+        Cached per module name for the lifetime of this loaded tool version.
+        Falls back to a fresh load (and populates the cache) the first time,
+        or whenever the process/module was reloaded from scratch."""
+        cached = cls._runtime_module_cache.get(module_name)
+        if cached is not None:
+            return cached
+        tools_directory = cls._runtime_tools_directory()
+        module_path = tools_directory / f"{module_name}.py"
+        if not module_path.is_file():
+            raise FileNotFoundError(f"deployed trading helper is missing: {module_name}")
+        directory_text = str(tools_directory)
+        if directory_text not in sys.path:
+            sys.path.insert(0, directory_text)
+        loaded_name = f"trading_runtime_{module_name}"
+        spec = importlib.util.spec_from_file_location(loaded_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load deployed trading helper: {module_name}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[loaded_name] = module
+        spec.loader.exec_module(module)
+        cls._runtime_module_cache[module_name] = module
+        return module
+
+    @staticmethod
+    def _readonly_import_connection(database_path: str) -> sqlite3.Connection:
+        db_path = Path(database_path)
+        if not db_path.is_file():
+            raise FileNotFoundError("Trading database not found")
+        conn = sqlite3.connect(
+            f"file:///{db_path.as_posix()}?mode=ro",
+            uri=True,
+            timeout=1.0,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        return conn

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VIPER-AI</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <button class="menu" id="menu" aria-label="Navigation">☰</button>
+    <a class="brand" href="#/dashboard"><img src="/static/logo.png" alt="VIPER-AI – Local Trading Assistant"></a>
+    <div class="status" id="status">verbinde …</div>
+  </header>
+  <nav class="sidebar" id="nav">
+    <a href="#/dashboard" data-page="dashboard">Dashboard</a>
+    <a href="#/portfolio" data-page="portfolio">Portfolio</a>
+    <a href="#/transactions" data-page="transactions">Transaktionen</a>
+    <a href="#/planner" data-page="planner">Planner / Aktionen</a>
+    <a href="#/watchlist" data-page="watchlist">Watchlist</a>
+    <a href="#/sectors" data-page="sectors">Sektoren</a>
+    <a href="#/intelligence" data-page="intelligence">Intelligence</a>
+    <div class="sep"></div>
+    <a href="#/jobs" data-page="jobs">Aufgaben</a>
+    <a href="#/tasks" data-page="tasks">Windows-Tasks</a>
+    <a href="#/import" data-page="import">Import</a>
+    <a href="#/chat" data-page="chat">Chat</a>
+    <a href="#/settings" data-page="settings">Einstellungen</a>
+  </nav>
+  <main id="page" class="page"></main>
+  <div id="tip" class="tip" hidden></div>
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

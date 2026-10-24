@@ -202,7 +202,7 @@ def _notes_for(record: NormalizedImportRecord) -> str:
 
 PARQET_ADAPTER = ImportAdapter(
     name="parqet", parse=parse_parqet_csv, import_type="PARQET_CSV_INCREMENTAL", source_label=IMPORT_SOURCE,
-    external_prefix="parqet:", reconciliation_source=LEGACY_RECONCILIATION_SOURCE, notes=_notes_for,
+    external_prefix="parqet:", reconciliation_source=LEGACY_RECONCILIATION_SOURCE, notes=_notes_for, full_export=True,
 )
 
 

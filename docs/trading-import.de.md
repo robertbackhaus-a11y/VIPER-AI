@@ -92,6 +92,7 @@ Es gibt weder einen FX-Kurs je Zeile noch eine Spalte `source`: Fremdwährungspo
 - Eine Zeile, die in Wertpapier, Typ und Zeitpunkt zu einer vorhandenen Transaktion passt, aber in einem Wert abweicht, oder deren `external_id` mit anderen Werten schon existiert, ist ein `CONFLICT`. Sie wird nie geschrieben und wird gemeldet.
 - Dieselbe Zeile zweimal in einer Datei ist für die zweite ein `CONFLICT`.
 - Dieselbe Datei erneut zu importieren fügt daher nichts ein, legt keine Position, Zuordnung, Campaign oder kein Event an und schreibt nicht einmal eine Zeile in `imports`.
+- Ein Parqet-Export enthält immer das ganze Depot. Fehlt darin eine früher aus Parqet importierte Transaktion eines Wertpapiers, das die Datei noch enthält, wurde sie in Parqet gelöscht oder ersetzt (zum Beispiel eine Einlieferung als Platzhalter, die später durch die echten Käufe ersetzt wurde). Die Prüfung nennt sie unter `removed_in_source` und als offenen Punkt `SOURCE_TRANSACTION_REMOVED`; der Campaign-Abgleich dieses Wertpapiers wird ausgesetzt, damit die doppelte Stückzahl nicht in Campaign-Ereignisse übernommen wird. Gelöscht wird sie nur, wenn ihre Transaktions-ID mit `--remove-transaction ID` (auf der Import-Seite: "entfernen") angegeben ist, im selben Schreibvorgang wie der Rest des Imports. Eine Transaktion, auf die ein Campaign-Ereignis verweist, wird nicht gelöscht. Wertpapiere, die in der Datei ganz fehlen, werden nicht verglichen (gefilterter Export).
 
 ## 9. Historische Transaktionen
 

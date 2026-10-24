@@ -14,14 +14,14 @@ export async function render(target) {
   const checkBtn = el("button", { class: "primary" }, "Prüfen");
   const importBtn = el("button", { class: "danger", disabled: true }, "Importieren");
   const out = el("div");
-  const decisions = { strategies: {}, aliases: {} };
+  const decisions = { strategies: {}, aliases: {}, removals: new Set() };
   let uploaded = null, checked = null;
 
   const form = () => ({ file_id: uploaded && uploaded.file_id, format_text: format.value, create_securities: create.checked, include_historical: historical.checked,
-    strategies: { ...decisions.strategies }, aliases: { ...decisions.aliases } });
+    strategies: { ...decisions.strategies }, aliases: { ...decisions.aliases }, removals: [...decisions.removals].sort() });
   const invalidate = () => { checked = null; importBtn.disabled = true; };
   [format, create, historical].forEach((i) => i.addEventListener("change", invalidate));
-  file.addEventListener("change", () => { uploaded = null; invalidate(); decisions.strategies = {}; decisions.aliases = {}; });
+  file.addEventListener("change", () => { uploaded = null; invalidate(); decisions.strategies = {}; decisions.aliases = {}; decisions.removals = new Set(); });
 
   const show = (view) => {
     const tables = [["Neue Wertpapiere", "securities"], ["Stammdaten", "masterdata"], ["Positionen", "positions"], ["Probleme", "problems"], ["Offene Punkte", "open_items"], ["Abweichungen", "differences"]];
@@ -46,6 +46,12 @@ export async function render(target) {
       const select = el("select", { onchange: (e) => { const v = options.strategy_values[e.target.value]; if (v) decisions.strategies[key] = v; else delete decisions.strategies[key]; invalidate(); } },
         options.strategies.map((s) => el("option", { value: s, selected: options.strategy_values[s] === (decisions.strategies[key] || null) }, s)));
       rows.push(el("tr", {}, el("td", {}, "Strategie"), el("td", {}, `${info.symbol || ""} ${info.name || ""}`), el("td", {}, `${info.shares ?? ""} Stück, neu gehalten ohne Strategie`), el("td", {}, select), el("td", {}, decisions.strategies[key] ? "gewählt" : "offen")));
+    }
+    for (const [id, info] of Object.entries(view.removal_infos || {})) {
+      const box = el("input", { type: "checkbox", checked: decisions.removals.has(id), disabled: info.linked,
+        onchange: (e) => { if (e.target.checked) decisions.removals.add(id); else decisions.removals.delete(id); invalidate(); } });
+      rows.push(el("tr", {}, el("td", {}, "Nicht mehr im Export"), el("td", {}, `${info.symbol || ""} ${info.name || ""}`), el("td", { class: "wrap" }, `${info.text} vom ${info.date} (Transaktion ${id})`),
+        el("td", {}, el("label", {}, box, " entfernen")), el("td", {}, info.linked ? "mit Campaign-Ereignis verknüpft" : info.remove ? (view.written ? "entfernt" : "wird entfernt") : "bleibt")));
     }
     if (!rows.length) return "";
     return panel("Zu entscheiden (jede Entscheidung braucht eine neue Prüfung)", el("div", { class: "table-wrap" }, el("table", {},

@@ -71,6 +71,7 @@ ROWS_BLOCKED = "ROWS_BLOCKED"
 HISTORICAL_ROWS_NOT_IMPORTED = "HISTORICAL_ROWS_NOT_IMPORTED"
 CAMPAIGN_START_IGNORED = "CAMPAIGN_START_IGNORED"
 MASTERDATA_CONFLICT = "MASTERDATA_CONFLICT"
+SOURCE_TRANSACTION_REMOVED = "SOURCE_TRANSACTION_REMOVED"
 ALIAS_NEW, ALIAS_EXISTS, ALIAS_REFUSED = "NEW", "EXISTS", "REFUSED"
 
 
@@ -117,6 +118,9 @@ class ImportAdapter:
     external_prefix: str  # transactions.external_id prefix
     reconciliation_source: str  # swing_campaign_event.source of reconciled trades
     notes: Callable[["NormalizedImportRecord"], str]  # transactions.notes (JSON)
+    # The file always lists every transaction of the portfolio (Parqet export): a row this source imported earlier that is no longer in it was
+    # deleted or replaced at the source (see _removed_in_source).
+    full_export: bool = False
 
 
 def get_adapter(name: str) -> ImportAdapter:
@@ -140,6 +144,7 @@ class ImportOptions:
     start_campaigns: bool = True  # False: no Swing campaign is derived and started automatically (an explicit --campaign-opened-at still is honoured)
     include_historical: bool = False  # part of the plan token: a check without historical rows cannot be applied with them (apply_import_plan also takes it as an argument)
     as_of_date: Optional[str] = None  # "today" for assignment lookups (tests); default: current UTC date
+    remove_transactions: tuple[int, ...] = ()  # transaction ids of the plan's removed_in_source rows the caller approved for deletion
 
     @property
     def has_phase_work(self) -> bool:
@@ -219,6 +224,7 @@ class ImportPlan:
     masterdata_updates: tuple[dict[str, Any], ...] = ()  # fields (ISIN, WKN) that are empty in the database and unambiguously given by the file
     masterdata_conflicts: tuple[dict[str, Any], ...] = ()  # the database holds another value than the file: reported, never overwritten
     identifier_aliases: tuple[dict[str, Any], ...] = ()  # identifiers of the file the caller declared to be an existing security (status NEW / EXISTS / REFUSED)
+    removed_in_source: tuple[dict[str, Any], ...] = ()  # transactions of this source the full export no longer contains (deleted or replaced at the source)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -260,6 +266,7 @@ class ImportPlan:
             "masterdata_updates": list(self.masterdata_updates),
             "masterdata_conflicts": list(self.masterdata_conflicts),
             "identifier_aliases": list(self.identifier_aliases),
+            "removed_in_source": list(self.removed_in_source),
             "historical_requires_approval": counts[CLASS_NEW_HISTORICAL.lower()] > 0,
             "conflict_count": counts[CLASS_CONFLICT.lower()],
             "rows": [record.primitive() for record in self.records],
@@ -1207,6 +1214,35 @@ def _masterdata_changes(conn: sqlite3.Connection, records: Iterable[NormalizedIm
     return updates, conflicts
 
 
+def _removed_in_source(conn: sqlite3.Connection, adapter: ImportAdapter, records: Iterable[NormalizedImportRecord]) -> list[dict[str, Any]]:
+    """Transactions this source imported earlier that its current full export no longer contains.
+
+    A provider that lists the whole portfolio (``full_export``) drops a row it deleted or replaced, e.g. a placeholder transfer superseded by the real
+    broker trades.  The import only adds rows, so without this check the old row would stay and double the position.  Only securities the file still
+    documents are compared (a security missing completely may be a filtered export, not a deletion); a row is never removed without the caller's approval.
+    """
+    if not adapter.full_export:
+        return []
+    records = list(records)
+    matched = {r.matched_transaction_id for r in records if r.matched_transaction_id is not None}
+    ids = sorted({int(r.security_id) for r in records if r.security_id is not None})
+    if not ids:
+        return []
+    # a transaction a campaign event links to cannot be deleted (ON DELETE RESTRICT); the count tells the caller why
+    linked = "(SELECT COUNT(*) FROM swing_campaign_event e WHERE e.transaction_id = t.id)" if _lifecycle_available(conn) else "0"
+    rows = conn.execute(
+        f"""SELECT t.id, t.security_id, s.symbol, s.name, t.transaction_type, t.transaction_date, t.shares, t.price, t.amount, t.currency, t.broker,
+                   {linked} AS campaign_events
+              FROM transactions t JOIN security s ON s.id = t.security_id
+             WHERE t.external_id LIKE ? AND t.security_id IN ({_TOUCHED}) ORDER BY t.security_id, t.transaction_date, t.id""",
+        (adapter.external_prefix + "%", json.dumps(ids)),
+    )
+    return [{"transaction_id": int(t["id"]), "security_id": int(t["security_id"]), "symbol": t["symbol"] or t["name"], "name": t["name"],
+             "transaction_type": t["transaction_type"], "transaction_date": t["transaction_date"], "shares": t["shares"], "price": t["price"], "amount": t["amount"],
+             "currency": t["currency"], "broker": t["broker"], "campaign_events": int(t["campaign_events"])}
+            for t in rows if int(t["id"]) not in matched]
+
+
 def build_import_plan(
     conn: sqlite3.Connection,
     csv_path: str | Path,
@@ -1228,16 +1264,18 @@ def build_import_plan(
     source_hash = _file_hash(path)
     aliases = _plan_aliases(conn, adapter, records, options)
     updates, conflicts = _masterdata_changes(conn, records, aliases)
-    touched = {int(r.security_id) for r in records if r.security_id is not None} | {int(a["security_id"]) for a in aliases if a.get("security_id") is not None}
+    removed = _removed_in_source(conn, adapter, records)
+    touched ={int(r.security_id) for r in records if r.security_id is not None} | {int(a["security_id"]) for a in aliases if a.get("security_id") is not None}
     latest_date, db_token = _db_state_token(conn, touched)
     token_payload = {
         "file_sha256": source_hash, "db_state": db_token, "adapter": adapter.name, "rows": [record.primitive() for record in records],
-        "masterdata": [updates, conflicts, aliases],
+        "masterdata": [updates, conflicts, aliases], "removed_in_source": removed,
         "options": {"create_securities": options.create_securities, "strategies": options.strategies, "campaign_opened_at": options.campaign_opened_at, "accept_aliases": options.accept_aliases, "start_campaigns": options.start_campaigns,
-                    "include_historical": options.include_historical},
+                    "include_historical": options.include_historical, "remove_transactions": sorted(options.remove_transactions)},
     }
     plan_token = hashlib.sha256(json.dumps(token_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return ImportPlan(str(path), source_hash, len(records), latest_date, db_token, plan_token, tuple(records), adapter.name, options, tuple(updates), tuple(conflicts), tuple(aliases))
+    return ImportPlan(str(path), source_hash, len(records), latest_date, db_token, plan_token, tuple(records), adapter.name, options, tuple(updates), tuple(conflicts), tuple(aliases),
+                      tuple(removed))
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------
@@ -1671,6 +1709,24 @@ def apply_import_plan(
                 conn.execute("INSERT INTO source_symbols(security_id, source_id, symbol) VALUES (?, ?, ?)", (alias["security_id"], source_id, alias["identifier"]))
                 aliases_recorded.append(alias)
 
+        # Rows the full export no longer contains: deleted only when the caller approved exactly these ids; every other one stays and is an open item.
+        stale = {item["transaction_id"]: item for item in fresh.removed_in_source}
+        unknown = sorted(set(options.remove_transactions) - set(stale))
+        if unknown:
+            raise TransactionImportError(f"transaction(s) {', '.join(map(str, unknown))} are not rows the file no longer contains; check again")
+        removed: list[dict[str, Any]] = []
+        for transaction_id in sorted(options.remove_transactions):
+            item = stale[transaction_id]
+            if item["campaign_events"]:
+                raise TransactionImportError(f"transaction {transaction_id} is linked to {item['campaign_events']} campaign event(s); remove the event(s) first")
+            notes = conn.execute("SELECT notes FROM transactions WHERE id = ?", (transaction_id,)).fetchone()[0]
+            try:
+                gain = float(json.loads(notes or "{}").get("parqet_realizedgains") or 0.0)
+            except (ValueError, TypeError, AttributeError):
+                gain = 0.0
+            conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+            removed.append({**item, "realized_gain": gain})
+
         inserted: list[int] = []
         finals: list[NormalizedImportRecord] = []
         for record in approved:
@@ -1692,9 +1748,12 @@ def apply_import_plan(
             )
             inserted.append(int(cursor.lastrowid))
             finals.append(replace(final, matched_transaction_id=int(cursor.lastrowid)))
-        affected = sorted({int(r.security_id) for r in finals})
+        affected = sorted({int(r.security_id) for r in finals} | {item["security_id"] for item in removed})
         for security_id in affected:
             _rebuild_position(conn, security_id, finals)
+        for item in removed:  # the rebuild keeps the persisted realized gain; the gain the removed row had contributed goes with it
+            if item["realized_gain"]:
+                conn.execute("UPDATE positions SET realized_gain = COALESCE(realized_gain, 0) - ? WHERE security_id = ?", (item["realized_gain"], item["security_id"]))
 
         # Strategy assignment and campaign initialization for every held security the file documents.
         candidates = sorted(set(record_ids) | set(key_to_id.values()))
@@ -1708,7 +1767,9 @@ def apply_import_plan(
             today=today, adapter=adapter, open_items=open_items, start_campaigns=options.start_campaigns,
         )
         reconcile_ids = sorted(set(affected) | set(phase["campaign_security_ids"]))
-        remaining_ids = [security_id for security_id in reconcile_ids if security_id not in phase["campaign_security_ids"]]
+        # A security with a row the source no longer contains has a doubtful position: reconciling its campaign against it would turn the doubt into events.
+        doubtful = {item["security_id"] for transaction_id, item in stale.items() if transaction_id not in options.remove_transactions}
+        remaining_ids = [security_id for security_id in reconcile_ids if security_id not in phase["campaign_security_ids"] and security_id not in doubtful]
         reconciliation = [*phase["reconciliation"], *reconcile_campaign_transactions(conn, remaining_ids, write=True, source=adapter.reconciliation_source)]
 
         audit = _duplicate_audit(conn)
@@ -1742,6 +1803,11 @@ def apply_import_plan(
         for conflict in fresh.masterdata_conflicts:
             open_items.append({"code": MASTERDATA_CONFLICT, "security_id": conflict["security_id"], "symbol": conflict["symbol"],
                                "detail": f"{conflict['field']}: {conflict['reason']} (database {conflict.get('database')}, file {conflict.get('file')})"})
+        for transaction_id, item in stale.items():
+            if transaction_id not in options.remove_transactions:
+                open_items.append({"code": SOURCE_TRANSACTION_REMOVED, "security_id": item["security_id"], "symbol": item["symbol"], "transaction_id": transaction_id,
+                                   "detail": f"{item['transaction_type']} {item['transaction_date'][:10]} {item['shares']} @ {item['price']} {item['currency'] or ''} (transaction_id {transaction_id}) "
+                                             f"is no longer in the file" + ("; linked to a campaign event" if item["campaign_events"] else "; campaign reconciliation skipped")})
         if blocked_rows:
             open_items.append({"code": ROWS_BLOCKED, "security_id": None, "symbol": None, "detail": f"{len(blocked_rows)} row(s) not importable (conflict, unknown security or invalid)", "rows": blocked_rows[:50]})
         skipped_historical = [r.source_row_number for r in fresh.records if r.classification == CLASS_NEW_HISTORICAL and not include_historical]
@@ -1757,8 +1823,10 @@ def apply_import_plan(
         summary["masterdata_updated"] = len(masterdata_updated)
         summary["masterdata_conflicts"] = len(fresh.masterdata_conflicts)
         summary["identifier_aliases_recorded"] = len(aliases_recorded)
+        summary["removed_in_source"] = len(stale)
+        summary["transactions_removed"] = len(removed)
         changed = bool(
-            inserted or created or masterdata_updated or aliases_recorded or summary["strategy_assignments_created"] or phase["campaigns"]
+            inserted or removed or created or masterdata_updated or aliases_recorded or summary["strategy_assignments_created"] or phase["campaigns"]
             or any(report.get("applied") for report in reconciliation)
         )
         if changed:
@@ -1781,7 +1849,7 @@ def apply_import_plan(
         raise
     return {
         "written": changed and not dry_run, "dry_run": dry_run, "would_write": changed,
-        "inserted_transaction_ids": inserted,
+        "inserted_transaction_ids": inserted, "removed_transactions": removed, "removed_in_source": list(fresh.removed_in_source),
         "transaction_count_before": before if changed else None, "transaction_count_after": after if changed else None,
         "backup_path": str(backup) if backup else None, "blocked_row_numbers": blocked_rows,
         "lifecycle": lifecycle if changed else [],

@@ -198,6 +198,8 @@ _TEXTS: dict[str, tuple[str, str]] = {
     "STRATEGY_ASSIGNMENT_REQUIRED": ("Strategiezuordnung fehlt", "Für das Wertpapier ist noch nicht festgelegt, ob es als Swing- oder Long-Term-Position geführt werden soll."),
     "MARKET_DATA_MISSING": ("Marktdaten fehlen", "Für eine belastbare Bewertung fehlen aktuelle oder ausreichende Kursdaten."),
     # -- transaction import (open items of the Import page) ------------------------------------------------------------------------
+    "SOURCE_TRANSACTION_REMOVED": ("Nicht mehr im Export", "Diese früher importierte Buchung fehlt im aktuellen Export: Sie wurde dort gelöscht oder ersetzt (zum Beispiel eine Einlieferung durch die echten Käufe). "
+                                   "Sie bleibt, bis du sie zum Entfernen auswählst; bis dahin wird die Campaign dieses Wertpapiers nicht abgeglichen."),
     "MASTERDATA_CONFLICT": ("Stammdaten-Konflikt", "Die Datenbank hat für das Wertpapier einen anderen Wert als die Datei (zum Beispiel eine andere ISIN). Es wurde nichts überschrieben."),
     "IDENTIFIER_ALIAS_REFUSED": ("Zuordnung abgelehnt", "Die angeforderte Zuordnung der Kennung zu einem Wertpapier wurde abgelehnt (zum Beispiel fehlt die gleiche WKN als Beleg); ein Import wäre nicht möglich."),
     "ROWS_BLOCKED": ("Zeilen nicht importierbar", "Einzelne Zeilen der Datei sind ein Konflikt, ein unbekanntes Wertpapier oder ungültig und wurden nicht importiert."),

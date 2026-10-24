@@ -50,18 +50,21 @@ class ImportView:
     differences: list[list[str]] = field(default_factory=list)
     alias_infos: dict[str, dict[str, Any]] = field(default_factory=dict)  # Parqet identifier -> what the user needs to decide on it (this check)
     strategy_infos: dict[str, dict[str, Any]] = field(default_factory=dict)  # strategy key -> the newly held position without a strategy (this check)
+    removal_infos: dict[str, dict[str, Any]] = field(default_factory=dict)  # transaction id -> a row the export no longer contains (this check)
     refused: list[str] = field(default_factory=list)  # identifiers whose alias the server refused (the import is then not possible)
     closing: list[str] = field(default_factory=list)
     tooltip: str = ""
 
 
 def request_arguments(path: str, format_text: str, create_securities: bool, include_historical: bool, strategies: Optional[dict[str, str]] = None,
-                      aliases: Optional[dict[str, str]] = None) -> dict[str, Any]:
+                      aliases: Optional[dict[str, str]] = None, removals: Optional[list[Any]] = None) -> dict[str, Any]:
     """Exactly what the user chose; nothing is filled in.  ``strategies`` maps a strategy key to ``swing`` / ``long_term`` / ``none`` (``none`` is not sent: the position simply
-    stays without a strategy), ``aliases`` maps a Parqet identifier to the security key.  No campaign is ever started by the page (``start_campaigns`` false)."""
+    stays without a strategy), ``aliases`` maps a Parqet identifier to the security key, ``removals`` lists the transaction ids the export no longer contains that the user
+    chose to remove.  No campaign is ever started by the page (``start_campaigns`` false)."""
     return {"file_path": path.strip(), "format": FORMATS.get(format_text, "parqet"), "create_securities": bool(create_securities), "include_historical": bool(include_historical),
             "strategies": [f"{key}={value}" for key, value in sorted((strategies or {}).items()) if value in ("swing", "long_term")],
-            "accept_aliases": [f"{identifier}={security}" for identifier, security in sorted((aliases or {}).items())], "start_campaigns": False}
+            "accept_aliases": [f"{identifier}={security}" for identifier, security in sorted((aliases or {}).items())], "start_campaigns": False,
+            "remove_transactions": sorted({int(item) for item in (removals or [])})}
 
 
 def _num(value: Any, digits: int = 2) -> str:
@@ -77,6 +80,11 @@ def _shares(value: Any) -> str:
     except (TypeError, ValueError):
         return DASH
     return (text or "0").replace(".", ",")
+
+
+def _date(value: Any) -> str:
+    text = str(value or "")[:10]
+    return f"{text[8:10]}.{text[5:7]}.{text[:4]}" if len(text) == 10 else DASH
 
 
 def _types(by_type: dict[str, int]) -> str:
@@ -108,13 +116,20 @@ def build(res_ok: bool, data: Any, message: str = "") -> ImportView:
     for identifier, alias in results.items():  # an alias already chosen: the result of the server (accepted, already stored or refused with the reason)
         info = view.alias_infos.setdefault(identifier, {"security": alias["security"], "name": alias.get("symbol"), "wkn": None, "database_isin": None, "same_wkn": None})
         info.update(status=alias["status"], reason=alias.get("reason") or "")
+    for item in diff.get("removed_in_source", []):
+        view.removal_infos[str(item["transaction_id"])] = {"symbol": item.get("symbol"), "name": item.get("name"), "date": _date(item.get("transaction_date")),
+                                                            "text": f"{TYPE_TEXT.get(item['transaction_type'], item['transaction_type'])} {_shares(item.get('shares'))} Stück zu {_num(item.get('price'))} {item.get('currency') or ''}".rstrip(),
+                                                            "remove": bool(item.get("remove")), "linked": bool(item.get("campaign_events"))}
     for needed in diff.get("strategy_needed", []):
         view.strategy_infos[needed["key"]] = {"name": needed.get("name") or needed.get("symbol"), "symbol": needed.get("symbol"), "shares": needed.get("shares")}
 
     nothing = not (new_tx["count"] or created or updates)
     prefix = "Import abgeschlossen" if written else "Prüfung"
+    gone = diff.get("removed_in_source", [])
     if written:
         view.headline = f"Import abgeschlossen: {new_tx['count']} neue Transaktionen, {len(created)} neue Wertpapiere, {len(changes)} geänderte Positionen."
+    elif nothing and not would_write and gone:
+        view.headline = f"Nichts Neues in der Datei, aber {len(gone)} früher importierte Buchung(en) fehlen im Export. Bitte unten entscheiden."
     elif nothing and not would_write:
         view.headline = "Keine Änderungen: Alles aus der Datei ist bereits in der Datenbank."
     else:
@@ -126,6 +141,10 @@ def build(res_ok: bool, data: Any, message: str = "") -> ImportView:
         f"Neue Wertpapiere: {len(created)}; ergänzte Stammdaten: {len(updates)}; Stammdaten-Konflikte: {len(conflicts)}",
         f"Historische Zeilen übersprungen: {diff['historical_skipped']}; Zeilen mit Problem: {problems}",
     ]
+    removed = diff.get("removed_in_source", [])
+    if removed:
+        chosen = sum(bool(item.get("remove")) for item in removed)
+        view.lines.append(f"Nicht mehr im Export: {len(removed)} früher importierte Buchung(en)" + (f", davon {chosen} " + ("entfernt" if written else "zum Entfernen gewählt") if chosen else ""))
     if data.get("backup_path"):
         view.lines.append("Sicherung der Datenbank: " + str(data["backup_path"]))
 

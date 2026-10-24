@@ -92,6 +92,7 @@ There is no per-row FX rate and no `source` column: foreign-currency positions a
 - A row that matches an existing transaction in security, type and time but differs in a value, or whose `external_id` exists with other values, is a `CONFLICT`. It is never written, and it is reported.
 - The same row twice in one file is a `CONFLICT` for the second one.
 - Importing the same file again therefore inserts nothing, creates no position, assignment, campaign or event, and writes not even an `imports` row.
+- A Parqet export always contains the whole portfolio. When a transaction imported from Parqet earlier is missing for a security the file still contains, Parqet deleted or replaced it (for example a placeholder transfer that was later replaced by the real buys). The check lists it under `removed_in_source` and as the open item `SOURCE_TRANSACTION_REMOVED`; the campaign reconciliation of that security is skipped so the doubled quantity is not taken into campaign events. It is deleted only when its transaction id is given with `--remove-transaction ID` (on the Import page: "entfernen"), in the same write as the rest of the import. A transaction a campaign event links to is never deleted. Securities missing from the file completely are not compared (filtered export).
 
 ## 9. Historical transactions
 

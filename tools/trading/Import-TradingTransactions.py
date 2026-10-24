@@ -96,6 +96,9 @@ def _print_workflow(result: dict[str, Any]) -> None:
             print(f"  master data: {item['symbol']} {item['field']} <- {item['to']}")
         for item in diff["masterdata_conflicts"]:
             print(f"  MASTER DATA CONFLICT: {item['symbol']} {item['field']}: database {item.get('database')} / file {item.get('file')} - {item['reason']}")
+        for item in diff.get("removed_in_source", []):
+            print(f"  NO LONGER IN THE FILE: transaction {item['transaction_id']} {item['symbol']} {item['transaction_type']} {item['transaction_date'][:10]} {item['shares']:g} @ {item['price']}"
+                  + (" - will be removed" if item["remove"] else " - kept; --remove-transaction " + str(item["transaction_id"]) + " deletes it"))
         for change in diff["position_changes"]:
             print(f"  position {change['kind']}: {change['symbol']} {change['shares_before']:g} -> {change['shares_after']:g}")
     if closing:
@@ -126,6 +129,8 @@ def _print_human(result: dict[str, Any], *, write: bool) -> None:
         return
     print("Transaction import completed" if result["would_write"] else "No changes to write")
     print(f"Inserted: {len(result['inserted_transaction_ids'])}")
+    if result.get("removed_transactions"):
+        print(f"Removed (no longer in the file): {', '.join(str(item['transaction_id']) for item in result['removed_transactions'])}")
     if result.get("backup_path"):
         print(f"Backup: {result['backup_path']}")
     _print_state(result, label="End state")
@@ -147,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--accept-identifier-alias", action="append", default=[], metavar="IDENTIFIER=SYMBOL", dest="accept_alias",
                         help="Declare that an identifier (ISIN) of the file IS an existing security (an ADR / GDR or another listing of the same instrument). Needs the same WKN in the file and in the "
                              "security master; stored as a source symbol, so later imports resolve it without a master data conflict (repeatable)")
+    parser.add_argument("--remove-transaction", action="append", default=[], type=int, metavar="TRANSACTION_ID", dest="remove_transaction",
+                        help="Delete a transaction the check lists as no longer in the export (Parqet replaced or deleted it at the source); only ids of that list are accepted (repeatable)")
     parser.add_argument("--no-campaign-start", action="store_true", help="Do not derive and start a Swing campaign automatically (an explicit --campaign-opened-at still starts one)")
     parser.add_argument("--json", action="store_true", help="Emit deterministic JSON")
     return parser
@@ -157,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.reconcile_campaigns == (args.csv is not None):
         parser.error("use exactly one of --csv or --reconcile-campaigns")
-    if args.reconcile_campaigns and (args.include_historical or args.create_securities or args.strategy or args.campaign_opened_at or args.accept_alias):
+    if args.reconcile_campaigns and (args.include_historical or args.create_securities or args.strategy or args.campaign_opened_at or args.accept_alias or args.remove_transaction):
         parser.error("--reconcile-campaigns takes no import options")
     if args.csv is not None and args.format is None:
         parser.error("--format canonical|parqet is required with --csv")
@@ -186,7 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         # One flow for both modes (import_workflow): check = complete dry run + difference + reconciliation of the simulated end state; write = backup, one transaction, then the
         # reconciliation of the file against the database.
         common = dict(fmt=args.format, create_securities=args.create_securities, strategies=args.strategy, campaign_opened_at=args.campaign_opened_at,
-                      include_historical=args.include_historical, accept_aliases=args.accept_alias, start_campaigns=not args.no_campaign_start)
+                      include_historical=args.include_historical, accept_aliases=args.accept_alias, start_campaigns=not args.no_campaign_start,
+                      remove_transactions=args.remove_transaction)
         if not args.write:
             result = import_workflow.check(args.db_path, args.csv, **common)
             print(json.dumps(result, sort_keys=True)) if args.json else _print_human(result, write=False)

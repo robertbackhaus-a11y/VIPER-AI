@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Parqet import: a transaction Parqet deleted or replaced after it was imported (for example a placeholder transfer superseded by the real buys) stayed in the database and doubled the position; the campaign reconciliation then took the doubled quantity into campaign events. The check now lists such rows (`removed_in_source`, open item `SOURCE_TRANSACTION_REMOVED`), skips the campaign reconciliation of that security, and deletes a row only when it is chosen (`--remove-transaction`, MCP `remove_transactions`, "entfernen" on the Import page).
+
 ### Changed
 - Web header: Ollama status next to the database status (a real check through `/api/status` with a short timeout; a failure only affects chat and analyses; a running Ollama without the configured model shows a yellow "Modell fehlt") and a gear button that opens the settings.
 - Web settings: the model is chosen from a list of every model the running Ollama offers; a configured model that is not installed is marked.

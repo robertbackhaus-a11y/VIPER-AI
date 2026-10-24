@@ -15,4 +15,4 @@ their deployment to the Windows Task Scheduler or systemd user timers).
 Runtime data (database, logs, task state, private universe files) never lives in the package; see ``viper_ai.app.runtime_paths``.
 """
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"

@@ -1,12 +1,21 @@
 # VIPER-AI – Architektur
 
 **Stand:** 2026-10-24
-**Basis:** VIPER-AI v0.6.0
+**Release:** VIPER-AI v1.0.0
 
 Dieses Dokument beschreibt die Gesamtarchitektur, den tatsächlichen Ist-Stand und das Ziel der Roadmap ([ROADMAP.md](ROADMAP.md)).
 Abschnitt 2 beschreibt nur, was im Code existiert; Abschnitte 3 bis 6 beschreiben das Ziel und sagen jeweils, was davon umgesetzt ist.
 Die Detailreferenz der Engine (Module, Schwellenwerte, MCP-Tools, Schema, Produktionspfade) bleibt
 [docs/trading-agent-architecture.de.md](docs/trading-agent-architecture.de.md); dieses Dokument wiederholt sie nicht.
+
+## Stand v1.0.0
+
+- Webfrontend (FastAPI auf 127.0.0.1, HTML/CSS/JavaScript) ist die einzige Oberfläche; kein Qt, kein PySide, kein Paket `gui`.
+- Kein APScheduler und kein eigener Scheduler-Prozess. Die Task-Wahrheit liegt in VIPER (`viper_ai/tasks`); Windows-Aufgabenplanung und
+  systemd-Benutzer-Timer sind nur Backends, die die Tasks ausführen (Abschnitt 4.3).
+- Unterstützt: Windows (Runtime-Root `C:\tools\Viper-AI`) und Linux (`~/.local/share/viper-ai`).
+- Reasoning auf LangGraph, Ergebnisse und Checkpoints in der Trading-Datenbank (Abschnitt 4.4). Keine Orderausführung.
+- MCP-Server mit serverseitigen Tool-Profilen; Profil `read` mit den 17 READ-Tools.
 
 ## 1. Architekturentscheidung
 
@@ -14,9 +23,9 @@ VIPER-AI bleibt eine eigenständige lokale Single-User-Trading-Plattform. Die fr
 
 REAPER-AI ist weder Laufzeitvoraussetzung noch Orchestrierungs-Framework für VIPER. Einzelne technisch neutrale Konzepte oder Implementierungen (z. B. Modellanbindung, MCP-Adapter, Protokollierung) können nach Prüfung übernommen werden.
 
-## 2. Ist-Stand v0.6.0
+## 2. Ausgangsstand v0.6.0 (historisch)
 
-Abschnitt 2 beschreibt den Ausgangsstand v0.6.0 (Grundlage von M0); den heutigen Stand nennen die Umsetzungsstände in Abschnitt 4.
+Abschnitt 2 beschreibt den Ausgangsstand v0.6.0 vor dem Umbau (Grundlage von M0); den Stand v1.0.0 nennen die Umsetzungsstände in Abschnitt 4.
 
 ### 2.1 Module und Datenflüsse
 
@@ -39,7 +48,7 @@ Fassade mcp-tools/trading_sqlite.py: Klasse Tools (27 Methoden; Policy tool_poli
 ```
 
 `<root>` ist `VIPER_TRADING_ROOT` (Produktion `C:\tools\Viper-AI`). Paket `viper_ai` (pip): `tools/trading` → `viper_ai.app`,
-`mcp-tools` → `viper_ai.mcp`, `gui` → `viper_ai.gui`. (Stand v0.6.0; heute ist Qt entfernt und `gui/` aufgelöst, siehe Abschnitt 4.1 und 4.3.)
+`mcp-tools` → `viper_ai.mcp`, `gui` → `viper_ai.gui`. (Stand v0.6.0; seit v1.0.0 ist Qt entfernt und `gui/` aufgelöst, siehe Abschnitt 4.1 und 4.3.)
 
 ### 2.2 Kopplung von Oberfläche und Fachlogik
 
@@ -67,7 +76,7 @@ Funktionen gibt es im Code nicht und sie werden deshalb neu, aber als rein lesen
 | Realisierter Gewinn | `positions.realized_gain` (persistiert, Herkunft teils Parqet) |
 | Historische Zeitreihen | Transaktionen in EUR; ein EUR-Depotwert eines Tages braucht für jede gehaltene Position einen Tageskurs und einen EZB-Kurs dieses Tages (höchstens 5 Tage alt) |
 
-## 3. Zielbild
+## 3. Zielbild (mit v1.0.0 umgesetzt)
 
 ```text
 Browser (lokal)
@@ -86,7 +95,7 @@ Browser (lokal)
 │ Bestehende VIPER Trading-Engine│ │ VIPER Reasoning           │
 │ Kurse, Portfolio, FX, Risiko,  │◄┤ Orchestrierung            │
 │ Performance, Strategien        │ │ Hypothesen, Evidenz,       │
-│ Bestehender Scheduler          │ │ Abwägung, Wiedervorlage   │
+│ Task-Definitionen → OS-Backend │ │ Abwägung, Wiedervorlage   │
 └──────────────┬─────────────────┘ └──────────┬────────────────┘
                │                              │
 ┌──────────────▼──────────────────────────────▼───────────────┐
@@ -145,7 +154,7 @@ ein umgebogener Hostname eine Aktion auslöst). Bewusst kein Login, keine Benutz
 
 Bestehende Funktionen für Marktdaten, Währungen, Depot-/Transaktionsdaten, Bewertung, Performance, technische bzw. fundamentale Analysen und Strategien bleiben dort, wo sie sich heute fachlich bewährt haben. Schnittstellen sollen von Qt entkoppelt werden, ohne Berechnungslogik zu duplizieren.
 
-Der bestehende Scheduler bleibt für deterministische, zeitgesteuerte Aufgaben zuständig (z. B. Datenaktualisierung). Nicht jede Kursaktualisierung erfordert ein LLM.
+Deterministische, zeitgesteuerte Aufgaben (z. B. Datenaktualisierung) laufen als VIPER-Tasks über den Scheduler des Betriebssystems. Nicht jede Kursaktualisierung erfordert ein LLM.
 
 **Umsetzungsstand (Korrektur von M3a, 24.10.2026):** Der in M3a eingeführte integrierte Scheduler (APScheduler im Web-Prozess, Jobs und
 Läufe in `scheduled_job` / `job_run`, Übernahme der Windows-Tasks) ist verworfen und entfernt; ebenso `scheduler/Manage-TradingTasks.ps1`,
@@ -268,7 +277,7 @@ observe -> assess_data --(unzureichend)--> finalize
 
 Die konkrete Frontend-Bibliothekswahl wird anhand von Funktion und Wartungsaufwand entschieden; sie darf nicht zum eigenständigen Großprojekt werden.
 
-## 7. Migration von Qt auf Web
+## 7. Migration von Qt auf Web (abgeschlossen mit v1.0.0)
 
 1. Ist-Zustand und Kopplungen erfassen.
 2. API ohne Änderungen an der fachlichen Berechnung einziehen.
@@ -291,6 +300,6 @@ Die Workflow-Liste der Qt-Oberfläche steht in [ROADMAP.md (M0)](ROADMAP.md#m0--
 
 ## 9. Abnahme und Pflege
 
-Maßgeblich sind funktionierende Depotkennzahlen, Qt-Funktionsparität, unveränderte Trading-Daten, ein belegbarer End-to-End-Reasoning-Fall und reproduzierbarer lokaler Start. Dokumentation (`README.md`, `ROADMAP.md`, `ARCHITECTURE.md`) wird mit den jeweiligen Änderungen gepflegt und vor dem Release abgeglichen.
+Maßgeblich sind funktionierende Depotkennzahlen, die Funktionsparität des Webs zur früheren Qt-Oberfläche, unveränderte Trading-Daten, ein belegbarer End-to-End-Reasoning-Fall und reproduzierbarer lokaler Start. Dokumentation (`README.md`, `ROADMAP.md`, `ARCHITECTURE.md`) wird mit den jeweiligen Änderungen gepflegt und vor dem Release abgeglichen.
 
 **Detaillierte Umsetzungsfolge:** siehe [`ROADMAP.md`](ROADMAP.md).

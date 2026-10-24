@@ -3,10 +3,10 @@
 
 """
 title: Trading SQLite
-author: VIPER-AI
+author: Robert Backhaus
 description: Direct unrestricted SQLite access to the local trading database with multi-statement and multi-result support.
-version: 1.7.0
-license: MIT
+version: 1.0.0
+license: Apache-2.0
 """
 
 from __future__ import annotations

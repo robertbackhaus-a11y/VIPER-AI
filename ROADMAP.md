@@ -2,10 +2,12 @@
 
 **Stand:** 2026-10-24
 **Ausgangspunkt:** VIPER-AI v0.6.0
+**Erreicht:** VIPER-AI v1.0.0 (24.10.2026)
 **Ziel:** Eigenständige lokale Trading- und Analyseplattform mit Weboberfläche und VIPER-spezifischer Reasoning-Orchestrierung.
 
 Diese Roadmap ist die verbindliche Arbeitsgrundlage. Architektur und Begründungen: [ARCHITECTURE.md](ARCHITECTURE.md).
-Status wird erst nach Prüfung auf „erledigt“ gesetzt.
+Status wird erst nach Prüfung auf „erledigt“ gesetzt. Mit v1.0.0 sind M0 bis M7 abgeschlossen; offene Punkte stehen unter
+[Nach v1.0.0](#nach-v100).
 
 ## Status
 
@@ -17,13 +19,14 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
 | M3 Qt-Funktionsparität | erledigt | alle Qt-Workflows im Browser (Liste unten); Qt bleibt bis M6 verfügbar |
 | M4 Reasoning-Orchestrierung | erledigt | LangGraph-Workflow `viper_reasoning.py`, Speicherung `analysis_store.py` |
 | M5 Intelligence-Cockpit | erledigt | Seite Intelligence mit Thesen, Analysen, Prozessen, Ereignissen und Analysedetail |
-| M3a Integrierte Aufgabenverwaltung | verworfen (24.10.2026) | APScheduler wieder entfernt; ersetzt durch die Task-Verwaltung in VIPER mit OS-Backends (M7). Produktion läuft bis zum nächsten Update noch mit dem integrierten Scheduler |
-| M3b Depotwert-Graph mit vollständiger Historie | erledigt (Code) | Zeiträume bis MAX, zeitgewichtete Rendite; EZB-Backfill in der Produktion offen |
+| M3a Integrierte Aufgabenverwaltung | verworfen (24.10.2026) | APScheduler wieder entfernt; ersetzt durch die Task-Verwaltung in VIPER mit OS-Backends (M7). Produktion seit 24.10.2026 ohne integrierten Scheduler |
+| M3b Depotwert-Graph mit vollständiger Historie | erledigt | Zeiträume bis MAX, zeitgewichtete Rendite; EZB-Backfill in der Produktion offen |
 | M3c ETF-Datentask: Aktualität und Zeitzone | erledigt | Ursachen: UTC-verankerte Windows-Trigger, Checkout-Instanz ohne private ETF-Dateien |
 | M3d Windows-Tasks per CLI verwalten | überholt durch M7 | `viper-ai tasks` bleibt, `Manage-TradingTasks.ps1` ist entfernt |
-| M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist einzige Oberfläche, Qt und `gui/` vollständig entfernt (24.10.2026); Produktion seit 24.10.2026 auf der Web-Version |
-| Architektur-Bereinigung | erledigt (Code) | ein Runtime-Root aus `runtime_paths.py`, Host/Origin-Prüfung für schreibende Web-Aufrufe |
-| M7 Task-Wahrheit in VIPER, Windows und Linux | erledigt (Code), nicht produktiv | `viper_ai/tasks`: Definitionen in VIPER, Backends Windows-Aufgabenplanung und systemd-Benutzer-Timer; CLI und Web gegen dieselbe Verwaltung |
+| M6 Web-Cutover und Qt-Ablösung | erledigt | Web ist einzige Oberfläche, Qt und `gui/` vollständig entfernt (24.10.2026); Produktion seit 24.10.2026 auf der Web-Version |
+| Architektur-Bereinigung | erledigt | ein Runtime-Root aus `runtime_paths.py`, Host/Origin-Prüfung für schreibende Web-Aufrufe |
+| M7 Task-Wahrheit in VIPER, Windows und Linux | erledigt, produktiv seit 24.10.2026 | `viper_ai/tasks`: Definitionen in VIPER, Backends Windows-Aufgabenplanung und systemd-Benutzer-Timer; CLI und Web gegen dieselbe Verwaltung |
+| **v1.0.0** | **erreicht (24.10.2026)** | erster stabiler Release: Web-only, kein Qt, kein APScheduler, Task-Wahrheit in VIPER, Windows und Linux |
 
 ## Leitlinien
 
@@ -47,7 +50,7 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
 **Abnahme:** Bestandsübersicht, Modulgrenzen und Migrationsliste liegen vor; keine funktionsgleiche Neuentwicklung eingeplant.
 
 **Ergebnis**
-- Bestandsübersicht, Kopplungen und Berechnungskonventionen: [ARCHITECTURE.md, Abschnitt 2](ARCHITECTURE.md#2-ist-stand-v060).
+- Bestandsübersicht, Kopplungen und Berechnungskonventionen: [ARCHITECTURE.md, Abschnitt 2](ARCHITECTURE.md#2-ausgangsstand-v060-historisch).
 - Die Qt-Oberfläche enthält keine Fachlogik. Sie liest ausschließlich über die MCP-Fassade `trading_sqlite.Tools`; ihre View-Modelle
   (`gui/viewmodels/`) und die Dienste für Scheduler, Ollama und Einstellungen sind Qt-frei und werden vom Web weiterverwendet.
 - Die Web-API ruft dieselbe Fassade im eigenen Prozess auf, mit derselben Tool-Policy wie die Qt-GUI (READ + `GUI_ACTIONS`).
@@ -226,9 +229,8 @@ das Web ist nur die Verwaltungsoberfläche (Seite Aufgaben: Zustand, Läufe, Log
 startet keinen Job mehr beim Start, `StartWhenAvailable` und `IgnoreNew` der Tasks bleiben. Die Tabellen `scheduled_job` / `job_run` bleiben in
 der Produktionsdatenbank unverändert liegen und werden nicht mehr gelesen. Am selben Tag weitergeführt in M7: Die Taskdefinitionen gehören
 jetzt VIPER, die Windows-Aufgabenplanung ist nur noch ein Deployment-Ziel.
-- **Offen bis zum nächsten Produktionsupdate:** Die Produktion läuft noch mit dem integrierten Scheduler (Version `045f5f2`), die sieben
-  Windows-Tasks sind deaktiviert. Das Update stellt mit `viper-ai tasks deploy` um (überträgt auch den Aktiviert-Zustand; M7,
-  [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion)).
+- **Produktion umgestellt am 24.10.2026** (Commit `708515b`): APScheduler deinstalliert, die sieben Windows-Tasks mit `viper-ai tasks deploy`
+  bereitgestellt und aktiviert.
 
 ### M3b – Depotwert-Graph mit vollständiger Historie (P1; nach M3a)
 
@@ -353,13 +355,16 @@ manuell starten, unter Windows und Linux. Keine zweite Task-Wahrheit außerhalb 
   Qt-Importe, kein PySide/APScheduler im Paket; pip-Installation in frischer venv (`pip check` ok); plattformneutrale Module unter Linux
   importierbar. Probelauf gegen die Produktions-Tasks: einzige Abweichung ist „Aktiviert“.
 - Screenshots der Web-Oberfläche mit einer Demo-Datenbank (erfundene Werte) in `docs/images`, eingebunden in `docs/web.*.md`.
-- **Nicht ausgeführt:** Produktionsupdate (siehe M3a, offen).
+- **Produktion umgestellt am 24.10.2026** (Commit `708515b`, Windows-Aufgabenplanung als Backend).
 
-## Empfohlene Arbeitsfolge
+## Nach v1.0.0
 
-1. **Block 1 – Webfundament:** M0 → M1 → M2 → M3.
-2. **Block 2 – Intelligence:** M4 (Konzeption ab M1) → M5, danach M3a (integrierte Aufgabenverwaltung) M3b (vollständiger Depotwert-Graph) und M3c (ETF-Datentask).
-3. **Block 3 – Cutover:** M6, sobald die tatsächlich benötigte Funktionsparität erreicht ist.
+Offen, nicht Teil von v1.0.0:
+
+- Produktion auf das Paket v1.0.0 aktualisieren (läuft mit Commit `708515b`, fachlich gleicher Code, Paketversion noch `0.6.0`).
+- Einmaliger EZB-Backfill in der Produktionsdatenbank für die vollständige Depothistorie (M3b) – nur nach Freigabe.
+- Linux-Backend bisher nur unter WSL Debian mit systemd geprüft, nicht im Dauerbetrieb.
+- Tabellen `scheduled_job` / `job_run` des verworfenen M3a liegen ungelesen in der Produktionsdatenbank; kein Schema-Rückbau geplant.
 
 ## Minimaler Prüfungsumfang
 

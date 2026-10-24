@@ -9,8 +9,8 @@ Research-TradingFundamentals.py
 
 This is NOT a parser. It does not fetch or parse any financial
 document itself. Its whole job is three steps around the actual
-research, which an LLM (Claude, run interactively against the prompt
-this script produces) does:
+research, which an LLM (run interactively against the prompt this
+script produces) does:
 
   1. Read a security + its existing `fundamentals` rows from the
      trading DB and build a self-contained research prompt for it.
@@ -25,7 +25,7 @@ this script produces) does:
      `fundamentals` table (idempotent, same UNIQUE key as the other
      Backfill-TradingFundamentals* tools), only with --write.
 
-Typical use from an interactive Claude Code session:
+Typical use from an interactive LLM agent session:
 
     python Research-TradingFundamentals.py --security-id 55 --years 3
     -> writes a prompt file, prints its path

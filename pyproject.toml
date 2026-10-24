@@ -28,8 +28,8 @@ authors = [{ name = "Robert Backhaus" }]
 # the pinned runtime versions of requirements.txt (keep them in sync)
 dependencies = [
     "mcp==2.3.0",
-    "pydantic==2.13.5",
-    "pypdf==6.19.0",
+    "pydantic==2.14.1",
+    "pypdf==6.21.1",
 ]
 
 [project.optional-dependencies]

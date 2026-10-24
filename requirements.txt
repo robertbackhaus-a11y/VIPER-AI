@@ -2,4 +2,4 @@
 # Exact pins are the tested versions; Dependabot proposes updates as pull requests.
 mcp==2.3.0        # MCP server adapter (mcp-tools/server.py)
 pydantic==2.13.5  # tool parameter models (mcp-tools/trading_sqlite.py)
-pypdf==6.19.0     # IR report text extraction (tools/trading/Backfill-TradingFundamentalsIR.py)
+pypdf==6.21.2     # IR report text extraction (tools/trading/Backfill-TradingFundamentalsIR.py)

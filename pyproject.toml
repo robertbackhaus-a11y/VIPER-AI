@@ -29,7 +29,7 @@ authors = [{ name = "Robert Backhaus" }]
 dependencies = [
     "mcp==2.3.0",
     "pydantic==2.13.5",
-    "pypdf==6.19.0",
+    "pypdf==6.21.2",
 ]
 
 [project.optional-dependencies]

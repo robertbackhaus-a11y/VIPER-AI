@@ -38,8 +38,10 @@ h3 { font-size: .95rem; margin: 14px 0 8px; color: var(--muted); font-weight: 60
 .status { margin-left: auto; color: var(--muted); font-size: .85rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .status .chip { display: inline-flex; align-items: center; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); white-space: nowrap; }
 .status .chip.err { border-color: #5a2128; color: #ffb3ba; }
+.status .chip.warn { border-color: #5a4a1a; color: var(--warn); }
 .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; box-shadow: 0 0 6px var(--accent); }
 .status .dot.err { background: var(--down); box-shadow: 0 0 6px var(--down); }
+.status .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .gear { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); flex: none; }
 .gear:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
 .gear.active { color: var(--accent); border-color: #1f4a35; }

@@ -45,7 +45,12 @@ async function route() {
 }
 
 // Header status: database and Ollama as compact chips; the detail of a failure is in the tooltip and on the settings page.
-const chip = (label, ok, tip) => el("span", { class: `chip ${ok ? "" : "err"}`, title: tip || null }, el("span", { class: `dot ${ok ? "" : "err"}` }), `${label} ${ok ? "OK" : "Fehler"}`);
+// A reachable Ollama without the configured model is a warning (choose the model on the settings page), not an outage.
+const chip = (label, ok, tip, level = ok ? "" : "err", text = ok ? "OK" : "Fehler") =>
+  el("span", { class: `chip ${level}`, title: tip || null }, el("span", { class: `dot ${level}` }), `${label} ${text}`);
+const ollamaChip = (o) => (o.ok ? chip("Ollama", true, `${o.model} · Ollama ${o.version}`)
+  : o.reachable ? chip("Ollama", false, `Ollama ${o.version} läuft, aber das Modell ${o.model} der Einstellungen ist nicht installiert – Modell unter Einstellungen wählen`, "warn", "Modell fehlt")
+  : chip("Ollama", false, `${o.error || "nicht erreichbar"} – betrifft nur Chat und Analysen`));
 
 async function status() {
   const box = document.getElementById("status");
@@ -54,7 +59,7 @@ async function status() {
     const db = s.database || {}, ollama = s.ollama || {};
     const warn = s.warnings && s.warnings.length ? el("span", { style: "color:#f2c14e", "data-tip": s.warnings.join("\n\n") }, `⚠ ${s.warnings.length} Hinweis${s.warnings.length > 1 ? "e" : ""}`) : "";
     box.replaceChildren(warn, chip("Datenbank", db.ok, db.ok ? s.db_path : db.message || db.error),
-      chip("Ollama", ollama.ok, ollama.ok ? `${ollama.model} · Ollama ${ollama.version}` : `${ollama.error || "nicht erreichbar"} – betrifft nur Chat und Analysen`),
+      ollamaChip(ollama),
       el("span", { class: "muted" }, `v${s.version}`));
   } catch (error) {
     box.replaceChildren(el("span", { class: "chip err" }, el("span", { class: "dot err" }), "Server nicht erreichbar"));

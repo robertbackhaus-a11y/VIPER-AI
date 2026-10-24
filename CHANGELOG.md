@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Changed
-- Web header: Ollama status next to the database status (a real check through `/api/status` with a short timeout; a failure only affects chat and analyses) and a gear button that opens the settings.
+- Web header: Ollama status next to the database status (a real check through `/api/status` with a short timeout; a failure only affects chat and analyses; a running Ollama without the configured model shows a yellow "Modell fehlt") and a gear button that opens the settings.
 - Web navigation can be collapsed to icons with ☰; the state is kept per browser in localStorage.
 - Web layout uses the full window width; the sector treemap and the effective-exposure map span the content width and are much taller; charts resize with their box (window, navigation, tab switch).
 

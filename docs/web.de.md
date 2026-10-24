@@ -88,7 +88,7 @@ Die OpenAPI-Beschreibung liegt unter `/api/docs`.
 | Einstellungen | Diagnose (Pfade, Datenbank, Ollama, Tool-Klassifikation) und die Einstellungen, die das Web nutzt |
 
 - Datenstand, Währung und Berechnungsbasis stehen im Kopf jeder Seite; der Tooltip „Berechnungsbasis“ nennt die Regeln aus Abschnitt 4.
-- Rechts oben stehen „Datenbank OK/Fehler“ und „Ollama OK/Fehler“ (Details im Tooltip und auf der Seite Einstellungen) und das Zahnrad, das die Einstellungen öffnet. Ist Ollama nicht erreichbar, betrifft das nur Chat und Analysen; Dashboard, Portfolio und Engine arbeiten weiter.
+- Rechts oben stehen „Datenbank OK/Fehler“ und „Ollama OK/Fehler“ (gelb „Modell fehlt“, wenn Ollama läuft, das eingestellte Modell aber nicht installiert ist; Details im Tooltip und auf der Seite Einstellungen) und das Zahnrad, das die Einstellungen öffnet. Ist Ollama nicht erreichbar, betrifft das nur Chat und Analysen; Dashboard, Portfolio und Engine arbeiten weiter.
 - ☰ oben links klappt die Navigation auf eine Symbolleiste ein (Name als Tooltip) und wieder aus; der Inhalt nutzt dann die frei werdende Breite. Der Zustand gilt für diesen Browser (localStorage). In schmalen Fenstern blendet ☰ die Navigation wie bisher ein und aus.
 - Die Zeiträume und ihre Kennzahlen berechnet die Engine (Abschnitt 4); die Seite schneidet nur die Tageswerte für den Chart aus und zeigt Lücken als Unterbrechung der Linie.
 - Jede Seite ruft dasselbe Tool mit denselben Argumenten und demselben View-Modell auf wie früher die Desktop-GUI; Wortlaut, Reason-Code-Texte, Prüfungen und die Reihenfolge der Schreibschritte sind gleich.

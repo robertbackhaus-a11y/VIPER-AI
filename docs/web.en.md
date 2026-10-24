@@ -88,7 +88,7 @@ The OpenAPI description is at `/api/docs`.
 | Einstellungen | diagnostics (paths, database, Ollama, tool classification) and the settings the web uses |
 
 - Data stand, currency and calculation basis are named in the head of every page; the tooltip "Berechnungsbasis" gives the rules of section 4.
-- The top right shows "Datenbank OK/Fehler" and "Ollama OK/Fehler" (details in the tooltip and on the settings page) and the gear that opens the settings. An unreachable Ollama affects only chat and analyses; dashboard, portfolio and engine keep working.
+- The top right shows "Datenbank OK/Fehler" and "Ollama OK/Fehler" (yellow "Modell fehlt" when Ollama runs but the configured model is not installed; details in the tooltip and on the settings page) and the gear that opens the settings. An unreachable Ollama affects only chat and analyses; dashboard, portfolio and engine keep working.
 - ☰ at the top left collapses the navigation to a bar of icons (the name as tooltip) and expands it again; the content then uses the freed width. The state is kept per browser (localStorage). In narrow windows ☰ shows and hides the navigation as before.
 - The periods and their figures are computed by the engine (section 4); the page only cuts the daily values for the chart and shows gaps as a break in the line.
 - Every page calls the same tool with the same arguments and the same view model as the desktop GUI did; wording, reason code texts, checks and the order of the write steps are the same.

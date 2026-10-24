@@ -17,11 +17,12 @@ Status wird erst nach Prüfung auf „erledigt“ gesetzt.
 | M3 Qt-Funktionsparität | erledigt | alle Qt-Workflows im Browser (Liste unten); Qt bleibt bis M6 verfügbar |
 | M4 Reasoning-Orchestrierung | erledigt | LangGraph-Workflow `viper_reasoning.py`, Speicherung `analysis_store.py` |
 | M5 Intelligence-Cockpit | erledigt | Seite Intelligence mit Thesen, Analysen, Prozessen, Ereignissen und Analysedetail |
-| M3a Integrierte Aufgabenverwaltung | erledigt (Code) | APScheduler im Web-Prozess, Jobs in SQLite; in der Produktion seit 24.10.2026 alle sieben Jobs übernommen |
+| M3a Integrierte Aufgabenverwaltung | verworfen (24.10.2026) | APScheduler wieder entfernt; Windows-Aufgabenplanung bleibt einziger Scheduler, das Web verwaltet sie nur. Produktion läuft bis zum nächsten Update noch mit dem integrierten Scheduler |
 | M3b Depotwert-Graph mit vollständiger Historie | erledigt (Code) | Zeiträume bis MAX, zeitgewichtete Rendite; EZB-Backfill in der Produktion offen |
 | M3c ETF-Datentask: Aktualität und Zeitzone | erledigt | Ursachen: UTC-verankerte Windows-Trigger, Checkout-Instanz ohne private ETF-Dateien |
 | M3d Windows-Tasks per CLI verwalten | erledigt (Code) | `viper-ai tasks list/deploy/edit/delete` über `Manage-TradingTasks.ps1` |
 | M6 Web-Cutover und Qt-Ablösung | erledigt (Code) | Web ist Standardstart, Qt entfernt; Produktion seit 24.10.2026 umgestellt |
+| Architektur-Bereinigung | erledigt (Code) | ein Runtime-Root aus `runtime_paths.py` (`C:\tools\Viper-AI`), Windows-Tasks als einziger Scheduler, Host/Origin-Prüfung für schreibende Web-Aufrufe |
 
 ## Leitlinien
 
@@ -214,9 +215,18 @@ Scheduler für zeit- und ereignisgesteuerte Aufgaben.
   Zustand des Windows-Tasks, „Übernehmen“ (erst nach einem erfolgreichen Lauf in VIPER: Job aktivieren, Windows-Task deaktivieren, nie löschen).
 - Prüfung (damals mit Tests, die mit der dauerhaften Testsuite entfernt wurden): Seeds unverändert, Lauf mit Starter/Log/Exitcode, kein Doppellauf, Zeitlimit, Neustart und
   Nachholen, Zeitplan, Übernahme; echte Skripte im Probelauf über den Scheduler (FX-Kurse, ETF-Daten: Exitcode 0).
-- **Nicht ausgeführt:** Die Übernahme in der Produktion. Sie setzt voraus, dass die neue Version installiert ist, die Migration gelaufen ist
-  und `viper-ai-web` dauerhaft läuft (Autostart bei Anmeldung, M6); erst dann je Job „Jetzt ausführen“ und „Übernehmen“. Bis dahin bleiben die
-  Windows-Tasks aktiv und unverändert.
+- Die Übernahme wurde am 24.10.2026 in der Produktion ausgeführt (alle sieben Jobs, Windows-Tasks deaktiviert, nicht gelöscht).
+
+**Korrektur (24.10.2026): verworfen.** Der integrierte Scheduler ist wieder entfernt (`web/scheduler.py`, `job_store.py`,
+`Migrate-TradingScheduler.py`, die Seite und die API `/api/scheduler`, die Abhängigkeit `APScheduler`, `--no-scheduler` ohne Wirkung).
+Begründung: Für sieben lokale Jobs braucht es keine zweite Scheduler-Wahrheit in SQLite neben der Windows-Aufgabenplanung; zwei Wege führen
+nur zu Doppelläufen oder zu Jobs, die nicht laufen. Die Windows-Aufgabenplanung bleibt bewusst der einzige Scheduler (`viper-ai tasks`, M3d),
+das Web ist nur die Verwaltungsoberfläche (Seite Aufgaben: Zustand, Läufe, Log, „Jetzt ausführen“ startet genau den Windows-Task). Das Web
+startet keinen Job mehr beim Start, `StartWhenAvailable` und `IgnoreNew` der Tasks bleiben. Die Tabellen `scheduled_job` / `job_run` bleiben in
+der Produktionsdatenbank unverändert liegen und werden nicht mehr gelesen.
+- **Offen bis zum nächsten Produktionsupdate:** Die Produktion läuft noch mit dem integrierten Scheduler (Version `045f5f2`), die sieben
+  Windows-Tasks sind deaktiviert. Beim Update im selben Schritt `viper-ai tasks deploy` und für alle sieben `viper-ai tasks edit <task> --enable`,
+  sonst läuft danach kein Job ([docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion)).
 
 ### M3b – Depotwert-Graph mit vollständiger Historie (P1; nach M3a)
 
@@ -288,7 +298,7 @@ Scheduler für zeit- und ereignisgesteuerte Aufgaben.
   umgerechnet statt den Versatz nur abzuschneiden.
 - Test: echte Test-Tasks unter eigenem Präfix (`ViperTest-*`) anlegen, zweites `deploy` unverändert, `edit` (Zeit, deaktivieren),
   `list`, fremden Namen abweisen, alle löschen; Probelauf gegen die Produktions-Tasks: alle sieben „unveraendert“. Nicht produktiv ausgerollt.
-- **Verhältnis zu M3a:** Beide Wege verwalten dieselben sieben Aufgaben. Solange die Produktion die Windows-Aufgabenplanung nutzt, ist
+- **Verhältnis zu M3a (überholt, M3a ist verworfen; `viper-ai tasks` ist der einzige Weg):** Beide Wege verwalten dieselben sieben Aufgaben. Solange die Produktion die Windows-Aufgabenplanung nutzt, ist
   `viper-ai tasks` der Weg dafür; die integrierte Aufgabenverwaltung (M3a) ersetzt ihn erst nach der Übernahme je Job. Welcher Weg
   dauerhaft gilt, ist deine Entscheidung; beide gleichzeitig aktiv zu lassen würde jeden Job doppelt ausführen.
 
@@ -309,7 +319,7 @@ Scheduler für zeit- und ereignisgesteuerte Aufgaben.
   Qt-Tests. Das Paket `gui` behält nur die Qt-freien View-Modelle und Dienste, die das Web nutzt. Extra `gui` ist ein Alias von `web`, damit
   der bisherige Installationsbefehl weiter funktioniert. Der klassische Deploy liefert keine GUI mehr aus.
 - Datenpfade, Start/Stopp und Logs geprüft: Datenbank und private Dateien über den Runtime-Root, Einstellungen in derselben Datei wie
-  bisher, Scheduler im Web-Prozess (Autostart bei Anmeldung empfohlen), Doppelstart verhindert.
+  bisher, Scheduler damals im Web-Prozess (seit der Korrektur von M3a: Windows-Aufgabenplanung), Doppelstart verhindert.
 - Prüfung: vollständige Suiten vor dem Entfernen der dauerhaften Testsuite grün; Installation aus dem Wheel in frischer venv geprüft (Standardstart liefert das Web auf der Root-Datenbank, Doppelstart nutzt die laufende Instanz, Upgrade lässt den Runtime-Root unverändert).
 - **Produktion umgestellt am 24.10.2026** nach [docs/web.de.md, Abschnitt 6](docs/web.de.md#6-start-einstellungen-und-produktion):
   Version installiert, zwei additive Migrationen, Autostart, alle sieben Jobs nach einem erfolgreichen Lauf übernommen (Windows-Tasks

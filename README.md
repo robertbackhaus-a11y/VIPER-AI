@@ -26,7 +26,9 @@ VIPER-AI analyses and simulates only: **it never places an order.**
 ## Release and development state
 
 - **Latest release: v0.6.0** (package version `0.6.0`). Since 24.10.2026 production runs the web version (commit
-  `045f5f2`, package version still `0.6.0`), and the integrated task scheduler runs the scheduled jobs.
+  `045f5f2`, package version still `0.6.0`) with the integrated task scheduler of M3a. That scheduler is removed again on `main`: the
+  Windows Task Scheduler is the only scheduler. The next production update must enable the seven Windows tasks again
+  (see [web.en.md](docs/web.en.md#6-start-settings-and-production)).
 - The repository history was started fresh on 24.10.2026 with the web version; the tags and releases up to v0.6.0 are no longer on
   GitHub. The v0.6.0 wheel is kept locally as the way back.
 - Changes after the release are listed under `[Unreleased]` in the [changelog](CHANGELOG.md); they become part of a release only with the
@@ -38,12 +40,13 @@ The binding plan is [ROADMAP.md](ROADMAP.md), the architecture and the current s
 both are written in German. State of the development branch:
 
 - Done: M0 inventory; M1 web API over the unchanged engine; M2 portfolio dashboard; M3 every desktop GUI workflow in the browser; M4 the
-  reasoning workflow on LangGraph; M5 the Intelligence page; M3a the integrated task scheduler; M3b the portfolio history with periods up to
+  reasoning workflow on LangGraph; M5 the Intelligence page; M3a the integrated task scheduler (removed again: the Windows Task Scheduler stays the only scheduler,
+  the web only manages it); M3b the portfolio history with periods up to
   MAX and a time-weighted return; M3c the time zone of the schedules.
 - Done: M6, the cutover in the code: the web front end is the standard start (`viper-ai-gui` opens it, so the desktop shortcut keeps its
   target) and the Qt desktop GUI is removed.
 - Production switched on 24.10.2026: web version installed, both additive migrations run, VIPER starts at logon, all seven jobs taken
-  over from Windows (the Windows tasks are disabled, not deleted; see [web.en.md](docs/web.en.md#6-start-settings-and-production)).
+  over by the integrated scheduler (the Windows tasks are disabled, not deleted). Until the next update production keeps running them that way.
 
 ## Installation
 
@@ -54,8 +57,7 @@ py -3.12 -m venv C:\tools\Viper-AI\.venv
 C:\tools\Viper-AI\.venv\Scripts\python.exe -m pip install "VIPER-AI[web] @ git+https://github.com/robertbackhaus-a11y/VIPER-AI.git@v<version>"
 ```
 
-The extra `web` brings the web front end, the reasoning workflow and the task scheduler (`fastapi`, `langgraph`,
-`langgraph-checkpoint-sqlite`, `APScheduler`); `[gui]` is kept as an alias of it, so the former production command keeps working. A wheel
+The extra `web` brings the web front end and the reasoning workflow (`fastapi`, `langgraph`, `langgraph-checkpoint-sqlite`); `[gui]` is kept as an alias of it, so the former production command keeps working. A wheel
 on the [release page](https://github.com/robertbackhaus-a11y/VIPER-AI/releases), once a release is published, works the same way. Do not move the environment after it is
 created: the command starters contain its path.
 
@@ -70,8 +72,10 @@ Then restart VIPER (close `viper-ai-gui` / `viper-ai-web` and start it again) an
 ## Runtime data
 
 The database, logs, scheduler data, backups and the private `*_local.json` files are not part of the package. `pip install`, `--upgrade`
-and `uninstall` never change them. They live under the runtime root set by `VIPER_TRADING_ROOT` (production `C:\tools\Viper-AI`, without
-the variable `C:\tools\trading`); the database is `<root>\data\trading.db`. `viper-ai paths` shows the folders in use.
+and `uninstall` never change them. They live under the runtime root `C:\tools\Viper-AI` (another one through the environment variable `VIPER_TRADING_ROOT`);
+the database is `<root>\data\trading.db`. The default comes from one place (`tools/trading/runtime_paths.py`), so the web front end,
+the MCP server, the scheduled tasks and the scripts use the same root and database; an explicit `--db`, `TRADING_DB_PATH` or a database
+saved in the settings wins. `viper-ai paths` shows the folders in use.
 
 ## Entry points
 
@@ -79,7 +83,7 @@ the variable `C:\tools\trading`); the database is `<root>\data\trading.db`. `vip
 |---|---|
 | `viper-ai` | `--version`, `list` (all commands), `paths`, `run <Script.py> [args]` |
 | `viper-ai-gui` | standard start: VIPER in the browser, no console window; a running VIPER is reused |
-| `viper-ai-web` | the same with a console (`--port`, `--db`, `--no-browser`, `--no-scheduler`) |
+| `viper-ai-web` | the same with a console (`--port`, `--db`, `--no-browser`) |
 | `viper-ai-mcp` | MCP server over stdio |
 | `viper-ai-orchestrator` | portfolio-wide read-only report |
 | `viper-ai-import-transactions` / `viper-ai-import-parqet` | transaction import (dry run by default, `--write` imports) |
@@ -97,7 +101,8 @@ viper-ai paths
 viper-ai-gui
 ```
 
-The integrated task scheduler runs inside VIPER, so VIPER should start at logon (`viper-ai-gui --no-browser` in the Windows startup folder).
+The scheduled jobs are the seven Windows tasks (`viper-ai tasks ...`); VIPER itself never starts a job on its own. `viper-ai-gui --no-browser`
+in the Windows startup folder only starts the user interface at logon.
 An MCP client starts the server like this; the profile `read` offers the read-only tools only (profiles:
 [SECURITY.md](SECURITY.md#mcp-tool-profiles)):
 

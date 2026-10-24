@@ -98,7 +98,7 @@ def _runtime_paths():
 
 def mcp_server() -> int:
     """The MCP server of this installation.  Without ``TRADING_DB_PATH`` it uses the database of the runtime root (``VIPER_TRADING_ROOT``, default
-    ``C:\\tools\\trading``); an explicit ``TRADING_DB_PATH`` always wins.  A database that does not exist stops the start (the server would only answer errors)."""
+    ``C:\\tools\\Viper-AI``, see ``runtime_paths``); an explicit ``TRADING_DB_PATH`` always wins.  A database that does not exist stops the start (the server would only answer errors)."""
     if any(arg in HELP_FLAGS for arg in sys.argv[1:]):
         return _command("viper-ai-mcp")
     try:

@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "trading"))
+import runtime_paths  # noqa: E402  - tools/trading/runtime_paths.py: the runtime root (VIPER_TRADING_ROOT) and its default paths
 
-DB_PATH = Path(
-    r"C:\tools\trading\data\trading.db"
-)
+
+DB_PATH = runtime_paths.default_db_path()
 
 
 # ============================================================

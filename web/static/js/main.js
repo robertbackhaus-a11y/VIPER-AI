@@ -18,7 +18,7 @@ const ROUTES = {
   settings: "settings",
   intelligence: "intelligence",
   analysis: "intelligence",
-  jobs: "jobs",
+  jobs: "tasks", // the former page of the integrated scheduler (removed): old links open the tasks
 };
 
 const page = document.getElementById("page");
@@ -27,7 +27,7 @@ const nav = document.getElementById("nav");
 async function route() {
   const [name = "dashboard", arg = ""] = location.hash.replace(/^#\/?/, "").split("?")[0].split("/");
   const module = ROUTES[name] ? ROUTES[name] : "dashboard";
-  for (const link of nav.querySelectorAll("a")) link.classList.toggle("active", link.dataset.page === ({ position: "portfolio", analysis: "intelligence" }[name] || name));
+  for (const link of nav.querySelectorAll("a")) link.classList.toggle("active", link.dataset.page === ({ position: "portfolio", analysis: "intelligence", jobs: "tasks" }[name] || name));
   nav.classList.remove("open");
   disposeCharts();
   loading(page);

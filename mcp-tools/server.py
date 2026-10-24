@@ -10,7 +10,8 @@ mit doppeltem Unterstrich (`__user__`, ...) werden aus der Tool-Signatur entfern
 wird intern mit einer festen Kennung gefuellt.
 
 Konfiguration ueber Umgebungsvariablen:
-  TRADING_DB_PATH       Pfad zur SQLite-Datenbank (Pflicht)
+  TRADING_DB_PATH       Pfad zur SQLite-Datenbank (Standard: <Runtime-Root>\\data\\trading.db aus
+                        runtime_paths, Root = VIPER_TRADING_ROOT oder C:\\tools\\Viper-AI)
   TRADING_TOOL_PROFILE  read (Standard: nur READ-Tools), gui (READ + die GUI-Aktionen) oder
                         admin (alle klassifizierten Tools inkl. sql_execute); ein anderer Wert
                         bricht den Start ab
@@ -176,9 +177,7 @@ POLICY = _load_policy()
 
 
 def build_server() -> MCPServer:
-    db_path = os.environ.get("TRADING_DB_PATH")
-    if not db_path:
-        raise SystemExit("TRADING_DB_PATH ist nicht gesetzt")
+    db_path = os.environ.get("TRADING_DB_PATH", "").strip()  # leer: der Standardpfad der Tools (runtime_paths)
     try:
         profile = POLICY.profile_from_env(os.environ)
     except ValueError as exc:
@@ -195,7 +194,7 @@ def build_server() -> MCPServer:
     for filename, modname in sources:
         tools_cls = _load_tools_class(filename, modname)
         instance = tools_cls()
-        if hasattr(instance.valves, "database_path"):
+        if db_path and hasattr(instance.valves, "database_path"):
             instance.valves.database_path = db_path
         for name, method in inspect.getmembers(instance, predicate=callable):
             if name.startswith("_") or name in excluded:

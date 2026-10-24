@@ -9,12 +9,13 @@ All paths must be absolute: a relative database path breaks the read-only tools 
 
 The defaults follow the installation the GUI runs from: the deployed copy and the repository use the classic runtime (``<root>\\.venv`` and ``<root>\\mcp\\server.py``),
 the pip installation uses its own Python and its own ``viper_ai\\mcp\\server.py``; database and logs are the ``data`` and ``logs`` folders of the root from
-``VIPER_TRADING_ROOT`` (default ``C:\\tools\\trading``), the same rule as ``tools/trading/runtime_paths.py``.  A value saved in ``settings.json`` always wins;
+``VIPER_TRADING_ROOT`` (default ``C:\\tools\\Viper-AI``), taken from ``runtime_paths`` of the same installation (the only place that knows the default).  A value saved in ``settings.json`` always wins;
 :func:`runtime_warnings` only reports a saved path that does not fit (missing database, a server of another installation).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import ntpath
@@ -29,9 +30,24 @@ APP_DIR_NAME = "TradingAgentGui"
 LOGGER_NAME = "tradinggui"
 PATH_FIELDS = ("mcp_python_path", "mcp_server_path", "trading_db_path", "trading_logs_dir")
 MIN_REFRESH_S, MAX_REFRESH_S = 30, 3600
-TRADING_ROOT_ENV = "VIPER_TRADING_ROOT"
-DEFAULT_TRADING_ROOT = r"C:\tools\trading"
 INSTALL_DIR = Path(__file__).resolve().parents[2]  # gui/services -> gui -> the repository, the trading root or the viper_ai package
+
+
+def _load_runtime_paths():
+    """``runtime_paths`` of this installation: ``viper_ai/app`` (pip), ``<root>/app`` (deployed copy) or ``tools/trading`` (repository)."""
+    for folder in (INSTALL_DIR / "app", INSTALL_DIR / "tools" / "trading"):
+        path = folder / "runtime_paths.py"
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location("viper_runtime_paths", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise FileNotFoundError(f"runtime_paths.py not found next to {INSTALL_DIR}")
+
+
+runtime_paths = _load_runtime_paths()
+TRADING_ROOT_ENV = runtime_paths.TRADING_ROOT_ENV
+DEFAULT_TRADING_ROOT = str(runtime_paths.DEFAULT_TRADING_ROOT)
 
 
 def is_installed_package() -> bool:
@@ -54,9 +70,11 @@ GUI_VERSION = _gui_version()
 
 
 def trading_root() -> str:
-    """``VIPER_TRADING_ROOT`` when it is an absolute path, else ``C:\\tools\\trading`` (a relative root is ignored and reported by :func:`runtime_warnings`)."""
-    configured = os.environ.get(TRADING_ROOT_ENV, "").strip()
-    return configured if configured and ntpath.isabs(configured) else DEFAULT_TRADING_ROOT
+    """``runtime_paths.trading_root()``; a relative ``VIPER_TRADING_ROOT`` is ignored here (the default is used) and reported by :func:`runtime_warnings`."""
+    try:
+        return str(runtime_paths.trading_root())
+    except ValueError:
+        return DEFAULT_TRADING_ROOT
 
 
 def installation_paths() -> dict[str, str]:

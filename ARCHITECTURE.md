@@ -135,8 +135,9 @@ API-Endpunkte werden aus dem Bestand abgeleitet, nicht durch eine umfangreiche v
 was die Qt-GUI darf: READ-Tools und `GUI_ACTIONS` aus `tool_policy.py`. Tabellen werden mit den bestehenden View-Modellen aufbereitet.
 
 **Umsetzungsstand (M1):** `web/app.py` und `web/engine.py`, Endpunkte in [docs/web.de.md](docs/web.de.md#3-api). Der Server hört nur auf
-127.0.0.1; ein schreibender Aufruf mit fremdem `Origin` wird abgelehnt (einzige Schutzmaßnahme: verhindert, dass eine fremde Webseite im
-Browser eine Aktion auslöst). Der Orchestrator wird 60 Sekunden zwischengespeichert. SSE ist noch nicht nötig.
+127.0.0.1; ein schreibender Aufruf wird nur mit `Host` `127.0.0.1:<Port>` / `localhost:<Port>` dieses Servers und, falls vorhanden, dem
+passenden `Origin` `http://127.0.0.1:<Port>` / `http://localhost:<Port>` angenommen, sonst 403 (verhindert, dass eine fremde Webseite oder
+ein umgebogener Hostname eine Aktion auslöst). Bewusst kein Login, keine Benutzer, keine Tokens. Der Orchestrator wird 60 Sekunden zwischengespeichert. SSE ist noch nicht nötig.
 
 ### 4.3 Trading-Engine
 
@@ -144,11 +145,17 @@ Bestehende Funktionen für Marktdaten, Währungen, Depot-/Transaktionsdaten, Bew
 
 Der bestehende Scheduler bleibt für deterministische, zeitgesteuerte Aufgaben zuständig (z. B. Datenaktualisierung). Nicht jede Kursaktualisierung erfordert ein LLM.
 
-**Umsetzungsstand (M3a):** Die zeitgesteuerten Aufgaben laufen künftig im VIPER-Prozess statt in der Windows-Aufgabenplanung: APScheduler
-(`web/scheduler.py`) plant die Jobs aus `scheduled_job`, jeder Lauf startet wie bisher `Run-TradingTask.py` mit Skript, Argumenten und Log und
-wird in `job_run` festgehalten. LangGraph bleibt den KI-Analysen vorbehalten, der Scheduler den zeit- und ereignisgesteuerten Aufgaben.
-Die Windows-Tasks bleiben bis zur Übernahme je Job aktiv; die Übernahme deaktiviert sie, gelöscht werden sie nie. Zeitpläne sind Uhrzeiten in
-`Europe/Berlin` (mit Sommer-/Winterzeit); UTC dient nur intern. Windows-Trigger werden deshalb ohne festen UTC-Versatz angelegt (M3c).
+**Umsetzungsstand (Korrektur von M3a, 24.10.2026):** Der in M3a eingeführte integrierte Scheduler (APScheduler im Web-Prozess, Jobs und
+Läufe in `scheduled_job` / `job_run`, Übernahme der Windows-Tasks) wurde verworfen und entfernt. Für sieben lokale Jobs lohnt keine zweite
+Scheduler-Wahrheit in SQLite neben der Windows-Aufgabenplanung. Die Windows-Aufgabenplanung bleibt bewusst der einzige Scheduler: sieben
+Tasks (`pythonw.exe Run-TradingTask.py <Log> <Skript> [Argumente]`, `StartWhenAvailable`, `MultipleInstances = IgnoreNew`, Startzeiten als
+Ortszeit ohne UTC-Versatz, DST-fest seit M3c), verwaltet mit `viper-ai tasks list|deploy|edit|delete` über `scheduler/Manage-TradingTasks.ps1`.
+Das Web ist nur die Oberfläche dafür (Seite Aufgaben über `gui/services/task_service.py`: Zustand, letzter Lauf, Log, „Jetzt ausführen“ =
+`Start-ScheduledTask` genau dieses Tasks) und startet nie selbst einen Job, auch nicht beim Start. LangGraph bleibt den KI-Analysen vorbehalten.
+
+**Runtime-Root:** Eine Quelle für alle Startwege: `tools/trading/runtime_paths.py` (Standard `C:\tools\Viper-AI`, Override
+`VIPER_TRADING_ROOT`). Web-Einstellungen, MCP-Server (`server.py`, `viper-ai-mcp`, Valve der Fassade), Tasks und Skripte leiten Root und
+Datenbank daraus ab; ausdrückliche Overrides (`--db`, `TRADING_DB_PATH`, gespeicherte Einstellungen) haben Vorrang.
 
 ### 4.4 Reasoning-Orchestrierung – eigenständig für VIPER
 

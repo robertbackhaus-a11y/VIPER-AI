@@ -4,14 +4,17 @@
 """FastAPI application of the web front end: JSON under ``/api``, the static page under ``/``.
 
 Every figure comes from the engine (``engine.Engine``); the endpoints only pick the tool, pass the arguments and serialise.  The server listens on
-127.0.0.1 only.  A write (``POST``) from a page of another origin is refused, so a foreign web site cannot trigger an action in the browser.
+127.0.0.1 only.  A write (every method but ``GET``/``HEAD``/``OPTIONS``) is accepted only with the ``Host`` ``127.0.0.1:<port>`` or ``localhost:<port>`` of this server
+and, when the browser sends one, the matching ``Origin`` ``http://127.0.0.1:<port>`` / ``http://localhost:<port>``; anything else gets 403.  So neither a foreign web
+site in the browser nor a DNS-rebinding name can trigger an action.  There is no login: the protection is the local binding plus this check.
+
+The web starts no job on its own: the scheduled jobs are Windows scheduled tasks, the Tasks page only shows them and starts one on an explicit click.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -22,10 +25,9 @@ from fastapi.staticfiles import StaticFiles
 
 from .deps import portfolio as vm_portfolio
 from .deps import settings as settings_mod
-from . import pages, reasoning, scheduler as scheduler_routes
+from . import pages, reasoning
 from .chat import ChatSession
 from .engine import Engine, ToolNotAllowed
-from .scheduler import JobRunner
 from .views import jsonable
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -75,7 +77,6 @@ class State:
         self._orchestrator: tuple[float, Any] | None = None
         self.task_watches: dict = {}  # scheduled tasks started from the Tasks page, followed until the scheduler reports their end
         self.chat = ChatSession(self)
-        self.jobs = JobRunner(self)
 
     async def orchestrator(self, refresh: bool = False) -> Any:
         if refresh or self._orchestrator is None or time.monotonic() - self._orchestrator[0] > ORCHESTRATOR_TTL_S:
@@ -87,28 +88,33 @@ class State:
         self._orchestrator = None
 
 
-def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = None, scheduler: bool = False) -> FastAPI:
-    """``scheduler=True`` (``viper-ai-web``) starts the integrated task scheduler with the server; tests and tools leave it off."""
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def local_write_allowed(method: str, host: Optional[str], origin: Optional[str], port: Optional[int]) -> bool:
+    """Whether a request may pass: reads always; a write only with ``Host`` = ``127.0.0.1:<port>`` / ``localhost:<port>`` of this server and an ``Origin``
+    (when sent) of ``http://`` with one of these two hosts and the same port.  ``port`` is the port the server listens on (``None``: taken from ``Host``)."""
+    if method.upper() in SAFE_METHODS:
+        return True
+    name, _, given = (host or "").strip().lower().rpartition(":")
+    if name not in LOCAL_HOSTS or not given.isdigit() or (port is not None and int(given) != port):
+        return False
+    return origin is None or origin.strip().lower() in {f"http://{h}:{given}" for h in LOCAL_HOSTS}
+
+
+def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = None) -> FastAPI:
     state = State(db_path, settings_path)
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        if scheduler:
-            state.jobs.start()
-        try:
-            yield
-        finally:
-            state.jobs.stop()
-
-    app = FastAPI(title="VIPER-AI", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json", lifespan=lifespan)
+    app = FastAPI(title="VIPER-AI", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
     app.state.viper = state
 
     @app.middleware("http")
-    async def same_origin_writes(request: Request, call_next):
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
-            origin = request.headers.get("origin")
-            if origin and origin.split("://", 1)[-1] != request.headers.get("host"):
-                return JSONResponse({"ok": False, "error": "FOREIGN_ORIGIN"}, status_code=403)
+    async def local_writes_only(request: Request, call_next):
+        server = request.scope.get("server")
+        port = server[1] if server and len(server) > 1 and server[1] else None
+        if not local_write_allowed(request.method, request.headers.get("host"), request.headers.get("origin"), port):
+            return JSONResponse({"ok": False, "error": "FOREIGN_ORIGIN"}, status_code=403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-cache"  # an updated installation is seen at the next page load
         return response
@@ -186,7 +192,6 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
 
     pages.register(app, state)
     reasoning.register(app, state)
-    scheduler_routes.register(app, state)
 
     # -- chat (SSE) ---------------------------------------------------------------------------------------------------------------
     @app.post("/api/chat")

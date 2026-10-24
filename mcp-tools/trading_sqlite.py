@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         database_path: str = Field(
-            default=r"C:\tools\trading\data\trading.db",
-            description="Full path to the local trading SQLite database.",
+            default_factory=lambda: _default_database_path(),
+            description="Full path to the local trading SQLite database (default: <trading root>\\data\\trading.db of runtime_paths).",
         )
 
         timeout_seconds: float = Field(
@@ -1442,14 +1442,16 @@ class Tools:
         """The folder of the trading helpers that belong to THIS server: ``app`` next to this tool's
         folder (the deployed ``C:\\tools\\trading\\mcp`` and the pip installation ``viper_ai/mcp``),
         ``tools/trading`` in a repository checkout; only otherwise ``<trading root>\\app``
-        (``VIPER_TRADING_ROOT``, default ``C:\\tools\\trading``).  A checkout or a pip installation
-        never silently runs the helpers of another (older) deployed copy."""
+        (``VIPER_TRADING_ROOT``; a copy of this file without its helpers has no default root).  A checkout
+        or a pip installation never silently runs the helpers of another (older) deployed copy."""
         here = Path(__file__).resolve().parent
         for candidate in (here.parent / "app", here.parent / "tools" / "trading"):
             if (candidate / "trading_orchestrator.py").is_file():
                 return candidate
         root = os.environ.get("VIPER_TRADING_ROOT", "").strip()
-        return (Path(root) if root else Path(r"C:\tools\trading")) / "app"
+        if not root:
+            raise FileNotFoundError("trading helpers not found next to this tool and VIPER_TRADING_ROOT is not set")
+        return Path(root) / "app"
 
     @classmethod
     def _load_runtime_trading_module(cls, module_name: str):
@@ -1491,3 +1493,13 @@ class Tools:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         return conn
+
+
+def _default_database_path() -> str:
+    """``runtime_paths.default_db_path()`` of the helpers that belong to this tool - the same database as the web front end, the scheduled
+    tasks and the scripts.  Empty when it cannot be determined (no helpers, relative ``VIPER_TRADING_ROOT``): every tool then reports the
+    missing database instead of opening another one."""
+    try:
+        return str(Tools._load_runtime_trading_module("runtime_paths").default_db_path())
+    except (OSError, ImportError, ValueError):
+        return ""

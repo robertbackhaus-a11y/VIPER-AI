@@ -33,7 +33,7 @@ def running(port: int) -> bool:
 
 
 def _log_to_file() -> None:
-    """``pythonw`` has no stdout/stderr; uvicorn and the scheduler log there, so they go to the settings folder instead."""
+    """``pythonw`` has no stdout/stderr; uvicorn logs there, so it goes to the settings folder instead."""
     if sys.stdout is not None and sys.stderr is not None:
         return
     try:
@@ -52,7 +52,7 @@ def main(argv: Optional[Sequence[str]] = None, prog: str = "viper-ai-web") -> in
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"TCP port on 127.0.0.1 (default {DEFAULT_PORT})")
     parser.add_argument("--db", default=None, help="absolute path of the trading database (default: trading_db_path of the settings)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser (for example for the autostart at logon)")
-    parser.add_argument("--no-scheduler", action="store_true", help="do not run the scheduled jobs of the integrated task scheduler in this process")
+    parser.add_argument("--no-scheduler", action="store_true", help=argparse.SUPPRESS)  # without effect: the jobs are Windows scheduled tasks, the web never runs them on its own
     _log_to_file()
     args = parser.parse_args(argv)
     url = f"http://{HOST}:{args.port}/"
@@ -69,7 +69,7 @@ def main(argv: Optional[Sequence[str]] = None, prog: str = "viper-ai-web") -> in
     except ImportError:  # python -m web from the repository root
         from web.app import create_app  # type: ignore[no-redef]
 
-    app = create_app(args.db, scheduler=not args.no_scheduler)
+    app = create_app(args.db)
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=HOST, port=args.port, log_level="warning", log_config=None)

@@ -20,8 +20,6 @@ import sqlite3
 from typing import Optional
 
 
-DB_PATH_HINT = r"C:\tools\trading\data\trading.db"
-
 TRADING_DAYS_PER_YEAR = 252
 
 # Lookback windows expressed in trading days (approximate calendar

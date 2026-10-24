@@ -18,7 +18,7 @@ Browser (http://127.0.0.1:8765/)
 - Allowed is exactly what the former desktop GUI was allowed to do: the READ tools and the actions of `GUI_ACTIONS` in `tool_policy.py`. `sql_execute`, `approve_swing_promotion` and every unknown name are refused (HTTP 403, `TOOL_NOT_ALLOWED`).
 - Values that no tool provides (holdings with cost basis, transactions, daily bars, portfolio history) come from `portfolio_history.py` over a read-only connection (`mode=ro`, `query_only`).
 - The page uses Apache ECharts 5.6.0 (dashboard charts) and TradingView Lightweight Charts 4.2.3 (price charts), both shipped under `web/static/vendor`; it loads nothing from the internet.
-- The server listens on 127.0.0.1 only. A write (`POST`) carrying the `Origin` of another site is refused (HTTP 403, `FOREIGN_ORIGIN`).
+- The server listens on 127.0.0.1 only. A write (anything but `GET`/`HEAD`/`OPTIONS`) is accepted only with the `Host` `127.0.0.1:<port>` or `localhost:<port>` of this server and, when the browser sends an `Origin`, only with `http://127.0.0.1:<port>` or `http://localhost:<port>`; anything else gets HTTP 403 (`FOREIGN_ORIGIN`). This keeps out foreign web sites in the browser and redirected host names (DNS rebinding). There is deliberately no login, no users and no tokens.
 
 ## 2. Installation and start
 
@@ -30,7 +30,7 @@ viper-ai-web
 viper-ai-web --port 8766 --no-browser
 ```
 
-- `viper-ai-web` starts the integrated task scheduler with it (enabled jobs run only while VIPER runs); `--no-scheduler` leaves it off.
+- The web never starts a job on its own, not at a start or restart either: the scheduled jobs are the seven Windows tasks (section 6). `--no-scheduler` is still accepted but has no effect any more.
 - Without `--db` the `trading_db_path` of the settings file (section 6) applies, otherwise `<root>\data\trading.db` of `VIPER_TRADING_ROOT`.
 - In the repository `python -m web` starts the same.
 
@@ -52,7 +52,6 @@ viper-ai-web --port 8766 --no-browser
 | `GET /api/diagnostics`, `GET` and `POST /api/settings` | paths, status, tool classification; settings | settings file |
 | `GET /api/intelligence`, `GET /api/intelligence/cases/{id}`, `GET /api/intelligence/securities` | current theses with reasons for a re-evaluation, analysis cases with their step protocol, securities to choose | `analysis_store` |
 | `POST /api/intelligence/analyze`, `POST /api/intelligence/cases/{id}/resume` | start an analysis (`security_id`, `question`, `supersedes_id`), continue an interrupted analysis | `viper_reasoning`, Ollama |
-| `GET /api/scheduler`, `POST /api/scheduler/jobs/{name}`, `.../run`, `.../takeover`, `GET .../runs` | task scheduler: overview, enable and change the schedule, run now, takeover of the Windows task, runs | `job_store`, APScheduler |
 | `GET /api/orchestrator` | the complete orchestrator result (cached for 60 seconds, `refresh=true` computes it again) | `run_trading_orchestrator` |
 | `POST /api/read/{tool}` | any READ tool with its arguments as JSON | READ tools |
 | `POST /api/action/{tool}` | one GUI action with its arguments as JSON | `GUI_ACTIONS` |
@@ -79,8 +78,7 @@ The OpenAPI description is at `/api/docs`.
 | Planner / Aktionen | engine actions per position, planned and deferred entries, entry candidates with sector and correlation risk |
 | Watchlist | table with filters and sorting; strategy, priority and sector are chosen in the table, the apply button saves (strategy, then priority, then sector; a failure stops the sequence); add with a check, remove after a confirmation; "Neues Wertpapier aufnehmen" (check, create only after a clean check of the unchanged form) |
 | Sektoren | treemap and tables of the sectors, ETF look-through; tab "Einzelwertrisiko" with its own treemap, company and ETF table |
-| Aufgaben | integrated task scheduler: enable, schedule (for example "So 10:00" for Sunday 10:00, several separated by ";"), run now, last run, last success, error details, state of the Windows task, takeover after a successful run |
-| Tasks | the seven scheduled tasks with data stand, run now after a confirmation (the existing scheduler task, followed until its end), end of the log, ETF data stand |
+| Aufgaben | the seven Windows tasks with state (including "disabled"), last run and result, next run, data stand, run now after a confirmation (starts exactly the existing Windows task, followed until its end), end of the log, ETF data stand; schedule, enabling and creating through `viper-ai tasks` |
 | Import | choose the file, check (writes nothing), decide open points (every decision needs a new check), import with the token of the check after a confirmation |
 | Chat | questions to the local model with the READ tools of the MCP profile `read`; answer, thinking, tool calls and errors kept apart; stop, new chat |
 | Intelligence | start an analysis; active theses with proposal, engine action, confidence, data stand, validity and reasons for a re-evaluation; analyses and processes (continue after an interruption); latest events |
@@ -98,12 +96,13 @@ The OpenAPI description is at `/api/docs`.
 
 - `viper-ai-gui` is the standard start (no console window): it starts the server if it does not run yet and opens the browser; if VIPER already runs, it only opens the browser. The desktop shortcut that used to start `viper-ai-gui.exe` therefore keeps its target. `viper-ai-web` does the same with a console.
 - Without a console the server writes its output to `%LOCALAPPDATA%\TradingAgentGui\web.log`. The settings stay in `%LOCALAPPDATA%\TradingAgentGui\settings.json` (Ollama URL and model, database, log folder of the tasks); the settings page changes them.
-- The integrated task scheduler runs only while VIPER runs. So `viper-ai-gui --no-browser` belongs in the autostart at logon (a shortcut in the folder `shell:startup`); it replaces the logon triggers of the Windows tasks.
+- The Windows Task Scheduler is the only scheduler. The jobs run by their Windows triggers (local time, DST-safe, `StartWhenAvailable`, `MultipleInstances = IgnoreNew`), whether VIPER runs or not; they are created, changed, enabled and deleted with `viper-ai tasks list|deploy|edit|delete`. The autostart (`viper-ai-gui --no-browser` in the folder `shell:startup`) only starts the user interface.
+- The integrated scheduler introduced in M3a (APScheduler) was removed again. The tables `scheduled_job` and `job_run` of a database it ran on stay untouched and are no longer read.
 
 Switching production over (each step can be undone, runtime data stays untouched):
 
 1. Install the new version with the extra `web` (`[gui]` is an alias and installs the same).
-2. `viper-ai run Migrate-TradingAnalysisCases.py --write` and `viper-ai run Migrate-TradingScheduler.py --write` (additive tables; check without `--write` first).
+2. `viper-ai run Migrate-TradingAnalysisCases.py --write` (additive table; check without `--write` first).
 3. Set up the autostart as above and start VIPER.
-4. On the page Aufgaben, per job run it now and, after the successful run, use the takeover button: the job then runs in VIPER, the Windows task is disabled, not deleted.
+4. Deploy and enable the Windows tasks: `viper-ai tasks deploy`, then `viper-ai tasks edit <task> --enable` for each of the seven tasks (`deploy` keeps the enabled state; without this step no job runs when they were disabled for the takeover by the integrated scheduler). Check with `viper-ai tasks list`.
 5. Way back: install the locally kept v0.6.0 wheel again (`pip install "<path>\viper_ai-0.6.0-py3-none-any.whl[gui]"`; the tag is no longer on GitHub) and enable the Windows tasks again with `viper-ai tasks edit <task> --enable`.

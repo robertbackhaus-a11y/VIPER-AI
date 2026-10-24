@@ -10,10 +10,11 @@ Two layouts run the same code:
 * the pip installation (``site-packages\\viper_ai\\app``): the code folder belongs to pip and is replaced on every upgrade, so nothing private may live there.  The private files are
   then read from and written to the runtime root instead: ``<trading root>\\app\\universe`` (the same files the deployed copy uses) and ``<trading root>\\app\\data``.
 
-The trading root is ``C:\\tools\\trading`` unless the environment variable ``VIPER_TRADING_ROOT`` names another folder (it must be absolute: a relative root would depend on the
-working directory of whoever starts a script, for example the Task Scheduler).  Every default runtime path is derived from it: the database ``<root>\\data\\trading.db``
+The trading root is ``C:\\tools\\Viper-AI`` unless the environment variable ``VIPER_TRADING_ROOT`` names another folder (it must be absolute: a relative root would depend on the
+working directory of whoever starts a script, for example the Task Scheduler).  This module is the only place that knows the default: the web front end, the MCP server, the
+scheduled tasks and every script derive their paths from it.  Every default runtime path is derived from the root: the database ``<root>\\data\\trading.db``
 (:func:`default_db_path`), the data folder with reports and caches (:func:`data_dir`) and the logs (:func:`logs_dir`).  An explicit ``--db`` / ``--db-path`` of a script,
-``TRADING_DB_PATH`` of the MCP server and a path saved in the GUI settings always win over the default.
+``TRADING_DB_PATH`` of the MCP server and a path saved in the web settings always win over the default.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Union
 
 TRADING_ROOT_ENV = "VIPER_TRADING_ROOT"
-DEFAULT_TRADING_ROOT = Path(r"C:\tools\trading")
+DEFAULT_TRADING_ROOT = Path(r"C:\tools\Viper-AI")
 CODE_DIR = Path(__file__).resolve().parent
 PACKAGED_UNIVERSE = CODE_DIR / "universe"
 PACKAGE_NAME = "viper_ai"

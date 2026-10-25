@@ -236,6 +236,8 @@ observe -> assess_data --(unzureichend)--> finalize
   (`metric:*`, `fundamental:*`, `engine:action`, `portfolio:*`, `news:<id>`, `event:<id>`).
 - LLM (bestehende Ollama-Anbindung `viper_ai/shared/services/ollama_client.py`, JSON-Antworten): Meldungslage, These und Gegenthese mit Annahmen,
   Unsicherheit und Datenlücken, begründeter Vorschlag. Jede Aussage zitiert Beleg-IDs; unbekannte IDs schickt `evidence_check` einmal zurück.
+  Jeder Modellschritt bekommt nur das Ergebnis des vorigen: `qualitative` die Meldungen (gleiche Schlagzeilen einmal), `hypothesis` Kennzahlen,
+  Meldungslage und die Beleg-IDs statt des ganzen Katalogs, `decide` These, Prüfergebnis und Risikokontext; geprüft wird gegen den ganzen Katalog.
 - `review` prüft deterministisch: zulässige Aktion für den Bestand (gehalten: HOLD/ADD/TRIM/SELL, sonst WATCH/BUY/NO_ACTION), Abweichung
   von der Engine-Aktion, Konfidenz bei eingeschränkter Datenlage höchstens mittel, Gültigkeit höchstens 90 Tage. Ein Vorschlag ist nie eine Order.
 - Speicherung: Fachergebnis in zwei additiven Tabellen der Trading-Datenbank (`analysis_case`, `analysis_step`; `analysis_store.py`,

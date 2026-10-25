@@ -49,9 +49,28 @@ CONFIDENCE = ("low", "medium", "high")
 
 SYSTEM = (
     "Du bist der Analyse-Baustein von VIPER-AI, einer lokalen Portfolio-Analyse. Du interpretierst nur: alle Zahlen kommen aus der Engine und "
-    "werden nicht neu berechnet. Jede Aussage nennt die IDs der Belege aus dem Belegkatalog (z. B. metric:rsi14, engine:action, news:123). "
-    "Erfinde keine Daten und keine Belege. Ein Handlungsvorschlag ist keine Order. Antworte ausschließlich mit einem JSON-Objekt auf Deutsch."
+    "werden nicht neu berechnet. Belege nennst du mit ihren IDs (z. B. metric:rsi14, engine:action, news:123) in den evidence-Feldern; das System "
+    "prüft sie, im Text werden sie nicht wiederholt. Erfinde keine Daten und keine Belege. Ein Handlungsvorschlag ist keine Order. "
+    "Antworte knapp und ausschließlich mit einem JSON-Objekt auf Deutsch."
 )
+
+
+def _dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _distinct_news(evidence: dict) -> dict:
+    """The news and event entries of the catalogue for the model, a repeated headline only once (the catalogue itself keeps every entry)."""
+    seen, out = set(), {}
+    for key, text in evidence.items():
+        if not key.startswith(("news:", "event:")):
+            continue
+        title = re.sub(r"\W+", " ", text.split(": ", 1)[-1].lower()).strip()
+        if key.startswith("news:") and title in seen:
+            continue
+        seen.add(title)
+        out[key] = text
+    return out
 
 
 class State(TypedDict, total=False):
@@ -294,21 +313,31 @@ def build_graph(llm: LLM, checkpointer=None):
         o = state["observation"]
         if not o["news"] and not o["events"]:
             return {"qualitative": {"summary": "Keine Meldungen oder Ereignisse im Betrachtungszeitraum.", "signals": [], "llm": False}}
-        items = {k: v for k, v in state["evidence"].items() if k.startswith(("news:", "event:"))}
+        items = _distinct_news(state["evidence"])
         answer = parse_json(llm(SYSTEM, "Lies die Meldungen und Ereignisse zu " + f"{o['security']['symbol']} ({o['security']['name']}). Belege:\n"
-                                + json.dumps(items, ensure_ascii=False) + '\nAntwort: {"summary": "...", "signals": [{"evidence": ["news:ID"], "direction": '
-                                '"positiv|negativ|neutral", "note": "..."}]}'))
+                                + _dumps(items) + "\nFasse gleiche Themen zu einem Signal zusammen (höchstens 6); Meldungen ohne Bezug zur These weglassen.\n"
+                                'Antwort: {"summary": "2-3 Sätze", "signals": [{"evidence": ["news:ID"], "direction": "positiv|negativ|neutral", '
+                                '"note": "1 Satz"}]}'))
         return {"qualitative": {"summary": str(answer.get("summary") or ""), "signals": _cited(answer.get("signals")), "llm": True}}
 
     def hypothesis(state: State) -> dict:
         o = state["observation"]
         feedback = (state.get("evidence_check") or {}).get("problems") or []
+        # The values of metric:*, fundamental:*, engine:* and portfolio:position are in the figures, the news content in the qualitative result:
+        # the model gets their ids, not the same data a second time.  The evidence check still uses the whole catalogue.
+        qual = {"summary": state["qualitative"].get("summary"), "signals": state["qualitative"].get("signals")}
+        signalled = {e for item in qual["signals"] or [] for e in item["evidence"]}
+        ids = [k for k in state["evidence"] if k != "portfolio:sector" and (not k.startswith(("news:", "event:")) or k in signalled)]
+        sector = {k: v for k, v in state["evidence"].items() if k == "portfolio:sector"}
         prompt = (f"Frage: {state['question']}\nWertpapier: {o['security']['symbol']} ({o['security']['name']}), gehalten: {'ja' if o['held'] else 'nein'}\n"
-                  f"Datenlage: {json.dumps(state['data_quality'], ensure_ascii=False)}\nKennzahlen (deterministisch): {json.dumps(state['quantitative'], ensure_ascii=False)}\n"
-                  f"Meldungslage: {json.dumps(state['qualitative'], ensure_ascii=False)}\nBelegkatalog: {json.dumps(state['evidence'], ensure_ascii=False)}\n"
+                  "Aufgabe: These und Gegenthese mit Belegen; die Aktion wählt der nächste Schritt.\n"
+                  f"Datenlage: {_dumps(state['data_quality'])}\nKennzahlen (deterministisch): {_dumps(state['quantitative'])}\n"
+                  f"Meldungslage: {_dumps(qual)}\n" + (f"Sektor: {_dumps(sector)}\n" if sector else "")
+                  + f"Beleg-IDs: {', '.join(ids)}\n"
                   + (f"Korrigiere diese Probleme der letzten Antwort: {feedback}\n" if feedback else "")
-                  + 'Antwort: {"thesis": "...", "counter_thesis": "...", "assumptions": ["..."], "evidence_for": [{"evidence": ["ID"], "note": "..."}], '
-                  '"evidence_against": [{"evidence": ["ID"], "note": "..."}], "uncertainty": "niedrig|mittel|hoch", "data_gaps": ["..."]}')
+                  + 'Antwort: {"thesis": "2-3 Sätze", "counter_thesis": "2-3 Sätze", "assumptions": ["höchstens 4"], '
+                  '"evidence_for": [{"evidence": ["ID"], "note": "1 Satz"}], "evidence_against": [{"evidence": ["ID"], "note": "1 Satz"}], '
+                  '"uncertainty": "niedrig|mittel|hoch", "data_gaps": ["..."]}')
         a = parse_json(llm(SYSTEM, prompt))
         return {"hypothesis": {"thesis": str(a.get("thesis") or ""), "counter_thesis": str(a.get("counter_thesis") or ""),
                                "assumptions": [str(x) for x in a.get("assumptions") or []], "evidence_for": _cited(a.get("evidence_for")),
@@ -339,12 +368,13 @@ def build_graph(llm: LLM, checkpointer=None):
 
     def decide(state: State) -> dict:
         allowed = HELD_ACTIONS if state["observation"]["held"] else NOT_HELD_ACTIONS
-        prompt = (f"These: {json.dumps(state['hypothesis'], ensure_ascii=False)}\nPrüfung der Belege: {json.dumps(state['evidence_check'], ensure_ascii=False)}\n"
-                  f"Risiko und Portfoliokontext (deterministisch): {json.dumps(state['risk'], ensure_ascii=False)}\nErlaubte Aktionen: {', '.join(allowed)}.\n"
+        check = {k: state["evidence_check"].get(k) for k in ("ok", "problems")}  # the cited ids are in the thesis already
+        prompt = (f"These: {_dumps(state['hypothesis'])}\nPrüfung der Belege: {_dumps(check)}\n"
+                  f"Risiko und Portfoliokontext (deterministisch): {_dumps(state['risk'])}\nErlaubte Aktionen: {', '.join(allowed)}.\n"
                   "Wäge These und Gegenthese ab und schlage eine Aktion vor. Weiche von der Engine-Aktion nur mit Begründung ab.\n"
-                  'Antwort: {"action": "...", "rationale": "2-4 Sätze: warum diese Aktion, die 2-4 entscheidenden Faktoren und warum die Gegenargumente '
-                  'zu keiner anderen Aktion führen; die Belege nicht erneut aufzählen", "confidence": "low|medium|high", "horizon_days": 30, "review_triggers": ["..."], '
-                  '"evidence": ["ID"]}')
+                  'Antwort: {"action": "...", "rationale": "2-4 Sätze: warum diese Aktion, die entscheidenden Faktoren und warum die Gegenargumente '
+                  'zu keiner anderen Aktion führen", "confidence": "low|medium|high", "horizon_days": 30, "review_triggers": ["höchstens 4"], '
+                  '"evidence": ["die entscheidenden IDs"]}')
         a = parse_json(llm(SYSTEM, prompt))
         return {"proposal": {"action": str(a.get("action") or "").upper(), "rationale": str(a.get("rationale") or ""), "confidence": str(a.get("confidence") or "").lower(),
                              "horizon_days": a.get("horizon_days"), "review_triggers": [str(x) for x in a.get("review_triggers") or []],

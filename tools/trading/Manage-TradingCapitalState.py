@@ -1,7 +1,11 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: Apache-2.0
 
-"""Controlled management CLI for auditable portfolio capital-state records."""
+"""Controlled management CLI for auditable portfolio capital-state records.
+
+With per-portfolio cash (``Migrate-TradingPortfolioCash.py``) ``set`` records the state of one portfolio (``--portfolio-id``, default 1 = "Main") and
+``show`` resolves one portfolio or, without ``--portfolio-id``, the total of all active portfolios.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
 from typing import Optional
 
+import portfolio_scope
 from capital_state import (
     EXTERNAL_FUNDING_KEY,
     FEATURE_VERSION,
@@ -105,9 +110,24 @@ def _validate_new_state(
     }
 
 
+def _require_portfolio(conn: sqlite3.Connection, portfolio_id: Optional[int]) -> Optional[int]:
+    """``portfolio_id`` checked against the database; without per-portfolio cash none can be named: the state is global."""
+    if portfolio_id is None:
+        return None
+    if not portfolio_scope.cash_available(conn):
+        raise CapitalStateValidationError(
+            "the capital state is global; apply Migrate-TradingPortfolioCash.py --write before using --portfolio-id"
+        )
+    try:
+        return portfolio_scope.require_portfolio(conn, portfolio_id)
+    except ValueError as exc:
+        raise CapitalStateValidationError(str(exc)) from exc
+
+
 def _payload(row: sqlite3.Row | dict) -> dict:
     return {
         "id": row["id"],
+        **({"portfolio_id": row["portfolio_id"]} if "portfolio_id" in row.keys() else {}),
         "as_of": row["as_of"],
         "base_currency": row["base_currency"],
         "cash_available": row["cash_available"],
@@ -129,9 +149,14 @@ def set_capital_state(
     source: str,
     quality: str = "available",
     notes: Optional[str] = None,
+    portfolio_id: Optional[int] = None,
     write: bool = False,
 ) -> dict:
+    """Record one state; with per-portfolio cash it belongs to ``portfolio_id`` (default: the default portfolio "Main")."""
     _require_feature(conn)
+    if portfolio_scope.cash_available(conn) and portfolio_id is None:
+        portfolio_id = portfolio_scope.DEFAULT_PORTFOLIO_ID
+    portfolio_id = _require_portfolio(conn, portfolio_id)
     payload = _validate_new_state(
         as_of=as_of,
         currency=currency,
@@ -141,21 +166,19 @@ def set_capital_state(
         quality=quality,
     )
     payload["notes"] = notes
+    if portfolio_id is not None:
+        payload["portfolio_id"] = portfolio_id
     if not write:
         return {"dry_run": True, "would_insert": payload}
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        columns = ("as_of", "base_currency", "cash_available", "buying_power", "source", "quality", "notes") + (
+            ("portfolio_id",) if portfolio_id is not None else ()
+        )
         cursor = conn.execute(
-            """
-            INSERT INTO portfolio_capital_state(
-                as_of, base_currency, cash_available, buying_power, source, quality, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload["as_of"], payload["base_currency"], payload["cash_available"],
-                payload["buying_power"], payload["source"], payload["quality"], notes,
-            ),
+            f"INSERT INTO portfolio_capital_state({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(payload[column] for column in columns),
         )
         row = conn.execute(
             "SELECT * FROM portfolio_capital_state WHERE id = ?", (cursor.lastrowid,)
@@ -172,8 +195,11 @@ def show_capital_state(
     *,
     evaluation_as_of: str,
     freshness_max_age_days: Optional[int] = None,
+    portfolio_id: Optional[int] = None,
 ) -> dict:
+    """The resolved state of one portfolio, or with ``portfolio_id`` None the total of all active portfolios."""
     _require_feature(conn)
+    portfolio_id = _require_portfolio(conn, portfolio_id)
     evaluation = _iso_date(evaluation_as_of, "as_of")
     if freshness_max_age_days is not None and freshness_max_age_days < 0:
         raise CapitalStateValidationError("freshness_max_age_days must be non-negative")
@@ -181,9 +207,11 @@ def show_capital_state(
         conn,
         evaluation,
         CapitalStateConfig(freshness_max_age_days=freshness_max_age_days),
+        portfolio_id=portfolio_id,
     )
     return {
         "evaluation_as_of": evaluation,
+        "portfolio": portfolio_scope.label(conn, portfolio_id),
         "cash_available": resolved.cash_available,
         "cash_quality": resolved.cash_quality.status.value,
         "cash_quality_details": resolved.cash_quality.details,
@@ -239,6 +267,11 @@ def validate_capital_states(conn: sqlite3.Connection) -> list[str]:
             errors.append(f"capital state id={row['id']} has an empty source")
         if row["quality"] not in ALLOWED_QUALITIES:
             errors.append(f"capital state id={row['id']} has invalid quality={row['quality']}")
+    if portfolio_scope.cash_available(conn):
+        for row in conn.execute(
+            "SELECT s.id, s.portfolio_id FROM portfolio_capital_state s LEFT JOIN portfolio p ON p.id = s.portfolio_id WHERE p.id IS NULL"
+        ):
+            errors.append(f"capital state id={row['id']} belongs to the unknown portfolio {row['portfolio_id']}")
     return errors
 
 
@@ -255,6 +288,7 @@ def _parse_args() -> argparse.Namespace:
     show_parser.add_argument("--db-path", "--db", dest="command_db_path", type=Path, help=argparse.SUPPRESS)
     show_parser.add_argument("--as-of", default=date.today().isoformat())
     show_parser.add_argument("--freshness-max-age-days", type=int)
+    show_parser.add_argument("--portfolio-id", type=int, help="one portfolio (depot); omit for the total of all active portfolios")
 
     set_parser = subparsers.add_parser("set", help="record one capital state (dry-run by default)")
     set_parser.add_argument("--db-path", "--db", dest="command_db_path", type=Path, help=argparse.SUPPRESS)
@@ -265,6 +299,7 @@ def _parse_args() -> argparse.Namespace:
     set_parser.add_argument("--source", required=True)
     set_parser.add_argument("--quality", choices=sorted(ALLOWED_QUALITIES), default="available")
     set_parser.add_argument("--notes")
+    set_parser.add_argument("--portfolio-id", type=int, help="the portfolio (depot) of the state; default 1 (Main)")
     set_parser.add_argument("--write", action="store_true")
 
     funding_parser = subparsers.add_parser("external-funding", help="show or set the external-funding planning flag (dry-run by default)")
@@ -289,6 +324,7 @@ def main() -> int:
                 conn,
                 evaluation_as_of=args.as_of,
                 freshness_max_age_days=args.freshness_max_age_days,
+                portfolio_id=args.portfolio_id,
             ))
             return 0
         if args.command == "external-funding":
@@ -304,6 +340,7 @@ def main() -> int:
                 source=args.source,
                 quality=args.quality,
                 notes=args.notes,
+                portfolio_id=args.portfolio_id,
                 write=write,
             ))
             return 0

@@ -71,7 +71,7 @@ There is no per-row FX rate and no `source` column: foreign-currency positions a
 | `COST` | `amount` | none | none | none | none |
 
 - The types `INTEREST`, `TAX`, `SPLIT` and `FEE` do not exist in the position model and are rejected with a clear message. A fee booked on its own is a `COST`. Stock splits are recorded with `Manage-TradingCorporateActions.py` (table `corporate_action`), never as a transaction.
-- The importer never changes cash. Record cash with `Manage-TradingCapitalState.py`.
+- The importer never changes cash. Record the cash per depot with `Manage-TradingCapitalState.py set --portfolio-id`.
 
 ## 6. Date, decimal and currency rules
 

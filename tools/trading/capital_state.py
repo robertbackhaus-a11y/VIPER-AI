@@ -1,14 +1,19 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read-only temporal resolution for recorded portfolio capital states."""
+"""Read-only temporal resolution for recorded portfolio capital states.
+
+With per-portfolio cash (``Migrate-TradingPortfolioCash.py``) the states follow the portfolio convention of ``portfolio_scope``: a portfolio id = the
+latest state of that portfolio, ``None`` = the latest state of every ACTIVE portfolio added up.  Without the migration there is the one global state.
+"""
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
+import portfolio_scope
 from analysis_contracts import AvailabilityStatus, CapitalStateContext, DataQuality
 from strategy_config import CapitalStateConfig
 
@@ -24,6 +29,9 @@ ALLOWED_QUALITIES = {
     AvailabilityStatus.UNAVAILABLE,
     AvailabilityStatus.STALE,
 }
+# the worst quality of the added-up states is the quality of the total
+_QUALITY_RANK = (AvailabilityStatus.AVAILABLE, AvailabilityStatus.PARTIAL, AvailabilityStatus.STALE, AvailabilityStatus.UNAVAILABLE)
+_FROM_CONNECTION: Any = object()
 
 
 def _iso_date(value: str | date | datetime) -> str:
@@ -88,14 +96,39 @@ def _field_quality(
     return source_quality
 
 
+def _latest_states(conn: sqlite3.Connection, evaluation_date: str, portfolio_id: Optional[int]) -> list[sqlite3.Row]:
+    """The latest state at or before ``evaluation_date``: of the one global state, of one portfolio, or of every active portfolio (total)."""
+    columns = "s.id, s.as_of, s.base_currency, s.cash_available, s.buying_power, s.source, s.quality"
+    if not portfolio_scope.cash_available(conn):
+        return conn.execute(f"SELECT {columns} FROM main.portfolio_capital_state s WHERE s.as_of <= ? ORDER BY s.as_of DESC, s.id DESC LIMIT 1",
+                            (evaluation_date,)).fetchall()
+    if portfolio_id is not None:
+        return conn.execute(f"SELECT {columns} FROM main.portfolio_capital_state s WHERE s.portfolio_id = ? AND s.as_of <= ? "
+                            "ORDER BY s.as_of DESC, s.id DESC LIMIT 1", (int(portfolio_id), evaluation_date)).fetchall()
+    return conn.execute(
+        f"""SELECT {columns} FROM main.portfolio_capital_state s JOIN main.portfolio p ON p.id = s.portfolio_id AND p.active = 1
+            WHERE s.id = (SELECT l.id FROM main.portfolio_capital_state l WHERE l.portfolio_id = s.portfolio_id AND l.as_of <= ?
+                          ORDER BY l.as_of DESC, l.id DESC LIMIT 1)
+            ORDER BY s.portfolio_id""", (evaluation_date,)).fetchall()
+
+
+def _sum(values: list[Any]) -> Optional[float]:
+    """The sum, or None when a part is unknown (a partial sum would understate the total)."""
+    return None if any(v is None for v in values) else float(sum(values))
+
+
 def resolve_capital_state(
     conn: sqlite3.Connection,
     evaluation_as_of: str | date | datetime,
     config: Optional[CapitalStateConfig] = None,
     *,
     base_currency: str = "EUR",
+    portfolio_id: Optional[int] = _FROM_CONNECTION,
 ) -> CapitalStateContext:
     """Resolve the latest eligible capital state without future look-ahead.
+
+    ``portfolio_id`` defaults to the portfolio context of ``conn`` (``portfolio_scope.current``): one portfolio, or ``None`` for the total of all active
+    portfolios, whose cash and buying power are added up (oldest ``as_of``, worst quality).  A portfolio without any state adds nothing to the total.
 
     A freshness threshold is deliberately optional.  Without one, a known
     state is never made stale merely because it is old.
@@ -112,33 +145,29 @@ def resolve_capital_state(
             "portfolio_capital_state migration feature version 1 is unavailable",
             external_funding,
         )
-    row = conn.execute(
-        """
-        SELECT id, as_of, base_currency, cash_available, buying_power, source, quality
-        FROM portfolio_capital_state
-        WHERE as_of <= ?
-        ORDER BY as_of DESC, id DESC
-        LIMIT 1
-        """,
-        (evaluation_date,),
-    ).fetchone()
-    if row is None:
+    if portfolio_id is _FROM_CONNECTION:
+        portfolio_id = portfolio_scope.current(conn)
+    rows = _latest_states(conn, evaluation_date, portfolio_id)
+    if not rows:
         return _unavailable(evaluation_date, "no capital state exists at or before evaluation_as_of", external_funding)
-    state_as_of = _iso_date(row["as_of"])
-    if str(row["base_currency"]).upper() != expected_currency:
-        return _unavailable(
-            evaluation_date,
-            f"capital state base currency {row['base_currency']} is not {expected_currency}",
-            external_funding,
-        )
-    try:
-        status = AvailabilityStatus(row["quality"])
-    except ValueError:
-        return _unavailable(evaluation_date, f"capital state has invalid quality {row['quality']}", external_funding)
-    if status not in ALLOWED_QUALITIES:
-        return _unavailable(evaluation_date, f"capital state has unsupported quality {row['quality']}", external_funding)
+    statuses = []
+    for row in rows:
+        if str(row["base_currency"]).upper() != expected_currency:
+            return _unavailable(
+                evaluation_date,
+                f"capital state base currency {row['base_currency']} is not {expected_currency}",
+                external_funding,
+            )
+        try:
+            status = AvailabilityStatus(row["quality"])
+        except ValueError:
+            return _unavailable(evaluation_date, f"capital state has invalid quality {row['quality']}", external_funding)
+        if status not in ALLOWED_QUALITIES:
+            return _unavailable(evaluation_date, f"capital state has unsupported quality {row['quality']}", external_funding)
+        statuses.append(status)
 
-    source_quality = DataQuality(status, (), state_as_of)
+    state_as_of = min(_iso_date(row["as_of"]) for row in rows)
+    source_quality = DataQuality(max(statuses, key=_QUALITY_RANK.index), (), state_as_of)
     freshness = config or CapitalStateConfig()
     if freshness.freshness_max_age_days is not None:
         age_days = (date.fromisoformat(evaluation_date) - date.fromisoformat(state_as_of)).days
@@ -151,16 +180,16 @@ def resolve_capital_state(
                 ),
                 state_as_of,
             )
-    cash = row["cash_available"]
-    buying_power = row["buying_power"]
+    cash = _sum([row["cash_available"] for row in rows])
+    buying_power = _sum([row["buying_power"] for row in rows])
     return CapitalStateContext(
-        cash_available=float(cash) if cash is not None else None,
+        cash_available=cash,
         cash_quality=_field_quality(cash, "cash_available", source_quality, state_as_of),
-        buying_power=float(buying_power) if buying_power is not None else None,
+        buying_power=buying_power,
         buying_power_quality=_field_quality(
             buying_power, "buying_power", source_quality, state_as_of
         ),
         as_of=state_as_of,
-        source=row["source"],
+        source=", ".join(dict.fromkeys(str(row["source"]) for row in rows)),
         external_funding_available=external_funding,
     )

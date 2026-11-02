@@ -11,6 +11,8 @@ Data model (``Migrate-TradingPortfolios.py``):
 * ``portfolio_position``: the positions rebuilt from the transactions, one row per ``(portfolio_id, security_id)``.
 * ``positions`` is now a VIEW: the positions of all portfolios added up per security (shares, cost basis, invested amount and realized gain summed; the
   average cost is the summed cost basis per share).  Every existing reader of ``positions`` (engine, collectors, MCP tools) keeps working unchanged.
+* ``portfolio_capital_state.portfolio_id`` (``Migrate-TradingPortfolioCash.py``): every recorded cash state belongs to one portfolio; a new portfolio starts
+  with a cash state of 0.  ``capital_state.resolve_capital_state`` follows the same convention (one portfolio, or the sum over all active ones).
 
 Security master data, prices, FX rates, fundamentals, news, the watchlist, strategy assignments and Swing campaigns stay global.
 
@@ -25,10 +27,13 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import date
 from typing import Any, Optional
 
 FEATURE_VERSION_KEY = "portfolio_schema_version"
 FEATURE_VERSION = "1"
+CASH_FEATURE_VERSION_KEY = "portfolio_cash_schema_version"
+CASH_FEATURE_VERSION = "1"
 DEFAULT_PORTFOLIO_ID = 1
 DEFAULT_PORTFOLIO_NAME = "Main"
 TOTAL_LABEL = "Gesamt"
@@ -88,6 +93,14 @@ _SCOPED_VIEWS = ("v_portfolio_market", "v_active_positions", "positions", "trans
 def available(conn: sqlite3.Connection) -> bool:
     """True when the database has the portfolio schema (``Migrate-TradingPortfolios.py --write``)."""
     return conn.execute("SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = 'portfolio_position'").fetchone() is not None
+
+
+def cash_available(conn: sqlite3.Connection) -> bool:
+    """True when the cash states are kept per portfolio (``Migrate-TradingPortfolioCash.py --write``); before, the one cash state is global."""
+    if not available(conn):
+        return False
+    marker = conn.execute("SELECT value FROM main.metadata WHERE key = ?", (CASH_FEATURE_VERSION_KEY,)).fetchone()
+    return marker is not None and marker[0] == CASH_FEATURE_VERSION
 
 
 def parse_portfolio_id(value: Any) -> Optional[int]:
@@ -206,20 +219,31 @@ def _clean_name(name: Any) -> str:
     return text
 
 
-def _commit(conn: sqlite3.Connection, sql: str, params: tuple) -> sqlite3.Cursor:
+def _execute(conn: sqlite3.Connection, sql: str, params: tuple) -> sqlite3.Cursor:
     try:
-        cursor = conn.execute(sql, params)
+        return conn.execute(sql, params)
     except sqlite3.IntegrityError as exc:
         conn.rollback()
         raise ValueError("Ein Depot mit diesem Namen gibt es schon" if "UNIQUE" in str(exc) else str(exc)) from exc
+
+
+def _commit(conn: sqlite3.Connection, sql: str, params: tuple) -> sqlite3.Cursor:
+    cursor = _execute(conn, sql, params)
     conn.commit()
     return cursor
 
 
 def create_portfolio(conn: sqlite3.Connection, name: Any, description: Any = None) -> dict[str, Any]:
+    """A new portfolio; with per-portfolio cash it starts with a recorded cash state of 0 (as of today)."""
     require_schema(conn)
-    cursor = _commit(conn, "INSERT INTO portfolio(name, description) VALUES (?, ?)", (_clean_name(name), (str(description).strip() or None) if description else None))
-    return get_portfolio(conn, int(cursor.lastrowid))
+    cursor = _execute(conn, "INSERT INTO portfolio(name, description) VALUES (?, ?)", (_clean_name(name), (str(description).strip() or None) if description else None))
+    portfolio_id = int(cursor.lastrowid)
+    if cash_available(conn):
+        _execute(conn, "INSERT INTO portfolio_capital_state(portfolio_id, as_of, base_currency, cash_available, buying_power, source, quality, notes) "
+                       "VALUES (?, ?, 'EUR', 0, NULL, 'portfolio created', 'available', 'Startwert eines neu angelegten Depots')",
+                 (portfolio_id, date.today().isoformat()))
+    conn.commit()
+    return get_portfolio(conn, portfolio_id)
 
 
 def update_portfolio(conn: sqlite3.Connection, portfolio_id: int, *, name: Any = None, description: Any = None, active: Optional[bool] = None) -> dict[str, Any]:
@@ -245,6 +269,8 @@ def delete_portfolio(conn: sqlite3.Connection, portfolio_id: int) -> None:
     if conn.execute("SELECT COUNT(*) FROM transactions WHERE portfolio_id = ?", (int(portfolio_id),)).fetchone()[0]:
         raise ValueError("Das Depot hat Transaktionen und kann nicht gelöscht werden (deaktivieren geht)")
     conn.execute("DELETE FROM portfolio_position WHERE portfolio_id = ?", (int(portfolio_id),))
+    if cash_available(conn):
+        conn.execute("DELETE FROM portfolio_capital_state WHERE portfolio_id = ?", (int(portfolio_id),))
     _commit(conn, "DELETE FROM portfolio WHERE id = ?", (int(portfolio_id),))
 
 

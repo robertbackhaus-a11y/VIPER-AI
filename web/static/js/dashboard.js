@@ -3,7 +3,7 @@
 // Dashboard: portfolio figures (/api/portfolio), history (/api/portfolio/history), allocation, top/flop, and the planner block of the
 // desktop dashboard (/api/views/dashboard). Every figure comes from the engine; this file only selects and formats.
 
-import { DASH, dataTable, day, echart, el, eur, get, kv, notes, panel, pct, portfolioId, read, signed, tone, vmTable } from "./core.js";
+import { DASH, dataTable, day, echart, el, eur, get, kv, notes, panel, pct, read, signed, tone, vmTable } from "./core.js";
 
 
 export async function render(target) {
@@ -30,9 +30,7 @@ export async function render(target) {
     kpi("Unrealisiert", el("span", { class: tone(t.unrealized_eur) }, signed(t.unrealized_eur, (v) => eur(v))), el("span", { class: tone(t.unrealized_pct) }, signed(t.unrealized_pct, (v) => pct(v)))),
     kpi("Realisiert (gespeichert)", eur(t.realized_eur), el("span", { "data-tip": "Summe realized_gain der Tabelle positions; ältere Werte stammen teils aus Parqet." }, "Herkunft")),
     kpi("Dividenden netto", eur(t.dividends_net_eur), "nach Steuern und Gebühren"),
-    // the capital state (cash) is global, not per depot: with one depot chosen the tile says so
-    portfolioId() ? kpi("Cash (global)", eur(t.cash_eur), `alle Depots, nicht depotbezogen${t.cash_as_of ? ` · Stand ${day(t.cash_as_of)}` : ""}`)
-      : kpi("Cash", eur(t.cash_eur), t.cash_as_of ? `Stand ${day(t.cash_as_of)}` : "kein Kapitalstand"),
+    kpi("Cash", eur(t.cash_eur), t.cash_as_of ? `Stand ${day(t.cash_as_of)}` : "kein Kapitalstand"),
   );
 
   const chartBox = el("div", { class: "chart" });

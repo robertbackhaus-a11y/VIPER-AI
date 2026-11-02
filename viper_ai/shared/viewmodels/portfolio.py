@@ -143,7 +143,7 @@ def _issue_level(severity: Any) -> str:
     return "blocker" if "BLOCKING" in str(severity) and not str(severity).startswith("NON_") else "warning"
 
 
-def build_dashboard(envelope: Any, db_status: Any = None, refreshed: Optional[datetime] = None, cash_global: bool = False) -> DashboardVM:
+def build_dashboard(envelope: Any, db_status: Any = None, refreshed: Optional[datetime] = None) -> DashboardVM:
     vm = DashboardVM(refreshed=fmt_time(refreshed))
     result, error = unwrap(envelope)
     if result is None:
@@ -165,8 +165,7 @@ def build_dashboard(envelope: Any, db_status: Any = None, refreshed: Optional[da
         ("Investierter Wert", fmt_eur(ctx.get("total_market_value"))),
         ("Swing", fmt_pct(ctx.get("swing_weight_pct")) + target(swing_t)),
         ("Long-Term", fmt_pct(ctx.get("long_term_weight_pct")) + target(lt_t)),
-        # cash is one global capital state, not per depot: with one depot chosen the label says so
-        ("Cash (global, alle Depots)" if cash_global else "Cash", fmt_eur(ctx.get("cash_available")) + (f" (Stand {ctx['capital_state_as_of']})" if ctx.get("capital_state_as_of") else "")),
+        ("Cash", fmt_eur(ctx.get("cash_available")) + (f" (Stand {ctx['capital_state_as_of']})" if ctx.get("capital_state_as_of") else "")),
         ("External Funding verfügbar", fmt_bool(external)),
         ("Allokations-Hinweise", format_reason_codes(_l(ctx.get("allocation_guardrails")))),
         ("Datenbank", DASH if not db else ("OK" if db.get("ok") else "Fehler")),

@@ -65,7 +65,8 @@ Die OpenAPI-Beschreibung liegt unter `/api/docs`.
 Sitzung des Browsers). Alle lesenden Endpunkte rechnen in diesem Kontext: Gesamt fasst alle aktiven Depots zusammen (gleiche Wertpapiere mit Stückzahl und Einstand
 addiert), ein Depot zeigt nur seine Daten. Watchlist, Marktdaten, Fundamentaldaten, News und Stammdaten sind global. Ein Import geht in das auf der Seite Import
 gewählte Zieldepot (`portfolio_id`); eine Intelligence-Analyse speichert ihren Depot-Kontext. Ohne die Migration `viper-ai run Migrate-TradingPortfolios.py --write`
-gibt es nur das bisherige Depot und keinen Umschalter.
+gibt es nur das bisherige Depot und keinen Umschalter. Auch der Cash ist depotbezogen (Gesamt = Summe der aktiven Depots); ohne
+`viper-ai run Migrate-TradingPortfolioCash.py --write` bleibt er ein globaler Wert, den jedes Depot anzeigt.
 
 ## 4. Berechnungsgrundlagen
 

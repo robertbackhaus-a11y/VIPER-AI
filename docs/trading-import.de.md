@@ -71,7 +71,7 @@ Es gibt weder einen FX-Kurs je Zeile noch eine Spalte `source`: Fremdwährungspo
 | `COST` | `amount` | keine | keine | keine | keiner |
 
 - Die Typen `INTEREST`, `TAX`, `SPLIT` und `FEE` gibt es im Positionsmodell nicht; sie werden mit einer klaren Meldung abgelehnt. Eine einzeln gebuchte Gebühr ist ein `COST`. Aktiensplits werden mit `Manage-TradingCorporateActions.py` erfasst (Tabelle `corporate_action`), nie als Transaktion.
-- Der Import ändert nie den Cash. Den Cash erfasst man mit `Manage-TradingCapitalState.py`.
+- Der Import ändert nie den Cash. Den Cash erfasst man je Depot mit `Manage-TradingCapitalState.py set --portfolio-id`.
 
 ## 6. Datum-, Dezimal- und Währungsregeln
 

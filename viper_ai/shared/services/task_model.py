@@ -76,7 +76,7 @@ MD, FXT, EN, FS, CD, MI, ER = ("Trading-MarketData-Backfill", "Trading-FXRates-B
 SPECS: dict[str, TaskSpec] = {
     MD: TaskSpec(MD, "Marktdaten", MARKET_DATA, (), "Bewertung, Entscheidungen und Planner der MCP-Tools",
                  "Tageskurse und Snapshots (Yahoo); braucht keinen anderen Task."),
-    FXT: TaskSpec(FXT, "FX-Kurse", FX, (), "EUR-Bewertung von USD/GBP/AUD/KRW-Positionen in den MCP-Tools", "EZB-Referenzkurse; braucht keinen anderen Task."),
+    FXT: TaskSpec(FXT, "FX-Kurse", FX, (), "EUR-Bewertung von USD/GBP/AUD/KRW-Positionen in den MCP-Tools; CNY/NZD für Fundamentals", "EZB-Referenzkurse; braucht keinen anderen Task."),
     EN: TaskSpec(EN, "Events / News", EVENTS_NEWS, (), "Market Intelligence (liest die gespeicherten News und SEC-Events)", "Unternehmens-News und SEC-Events; braucht keinen anderen Task."),
     FS: TaskSpec(FS, "Fundamentals (SEC)", FUNDAMENTALS, (), "Fundamental-Bewertung der MCP-Tools", "Wöchentlich und eigenständig; schreibt nur neue Filings."),
     CD: TaskSpec(CD, "Candidate Discovery", DISCOVERY, (

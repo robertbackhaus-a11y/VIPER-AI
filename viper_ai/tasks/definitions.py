@@ -46,7 +46,7 @@ class TaskDefinition:
 
 BUILTIN: tuple[TaskDefinition, ...] = (
     TaskDefinition("MarketData-Backfill", "Marktdaten", "Backfill-TradingMarketData.py", ("--write",), "market-data-backfill.log", ("17:15",), at_login=True),
-    TaskDefinition("FXRates-Backfill", "FX-Kurse", "Backfill-TradingFXRatesECB.py", ("--write", "--quote-currency", "USD,GBP,AUD,KRW"), "fx-rates-backfill.log",
+    TaskDefinition("FXRates-Backfill", "FX-Kurse", "Backfill-TradingFXRatesECB.py", ("--write", "--quote-currency", "USD,GBP,AUD,KRW,CNY,NZD"), "fx-rates-backfill.log",
                    ("17:20",), at_login=True),
     TaskDefinition("EventsNews-Backfill", "Events / News", "Backfill-TradingEventsNews.py", ("--write",), "events-news-backfill.log", ("17:25",), at_login=True),
     TaskDefinition("Fundamentals-SEC", "Fundamentals (SEC)", "Backfill-TradingFundamentalsSEC.py", (), "fundamentals-sec-backfill.log", ("10:00",), "sunday",

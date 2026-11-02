@@ -136,7 +136,7 @@ viper_ai/tasks/definitions.py   the seven tasks (name, script, arguments, schedu
 | Task | Script and arguments | Schedule (local time) | Time limit | At login |
 |---|---|---|---|---|
 | `Trading-MarketData-Backfill` | `Backfill-TradingMarketData.py --write` | daily 17:15 | 72 h | yes |
-| `Trading-FXRates-Backfill` | `Backfill-TradingFXRatesECB.py --write --quote-currency USD,GBP,AUD,KRW` | daily 17:20 | 72 h | yes |
+| `Trading-FXRates-Backfill` | `Backfill-TradingFXRatesECB.py --write --quote-currency USD,GBP,AUD,KRW,CNY,NZD` | daily 17:20 | 72 h | yes |
 | `Trading-EventsNews-Backfill` | `Backfill-TradingEventsNews.py --write` | daily 17:25 | 72 h | yes |
 | `Trading-Fundamentals-SEC` | `Backfill-TradingFundamentalsSEC.py` | Sun 10:00 | 72 h | yes |
 | `Trading-Candidate-Discovery` | `Discover-TradingCandidates.py` | daily 17:35 | 2 h | no |

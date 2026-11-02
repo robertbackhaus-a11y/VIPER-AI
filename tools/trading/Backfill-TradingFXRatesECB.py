@@ -27,8 +27,9 @@ from urllib.request import Request, urlopen
 
 DB_PATH = runtime_paths.default_db_path()
 ECB_SOURCE = "ECB"
-# Quote currencies of the securities held or watched (USD, GBP via GBp, AUD, KRW).
-DEFAULT_QUOTE_CURRENCIES = ("USD", "GBP", "AUD", "KRW")
+# Quote currencies of the securities held or watched (USD, GBP via GBp, AUD, KRW) and the reporting currencies of their fundamentals that the ECB
+# publishes directly (CNY, NZD).  TWD has no ECB reference rate.
+DEFAULT_QUOTE_CURRENCIES = ("USD", "GBP", "AUD", "KRW", "CNY", "NZD")
 ECB_API_ROOT = "https://data-api.ecb.europa.eu/service/data/EXR"
 
 

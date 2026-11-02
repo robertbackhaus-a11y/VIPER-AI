@@ -49,7 +49,8 @@ BUILTIN: tuple[TaskDefinition, ...] = (
     TaskDefinition("FXRates-Backfill", "FX-Kurse", "Backfill-TradingFXRatesECB.py", ("--write", "--quote-currency", "USD,GBP,AUD,KRW,CNY,NZD"), "fx-rates-backfill.log",
                    ("17:20",), at_login=True),
     TaskDefinition("EventsNews-Backfill", "Events / News", "Backfill-TradingEventsNews.py", ("--write",), "events-news-backfill.log", ("17:25",), at_login=True),
-    TaskDefinition("Fundamentals-SEC", "Fundamentals (SEC)", "Backfill-TradingFundamentalsSEC.py", (), "fundamentals-sec-backfill.log", ("10:00",), "sunday",
+    # one run: SEC + IR import, gap analysis, research jobs, valuation refresh (fundamentals_completion.py); key and log keep their old names
+    TaskDefinition("Fundamentals-SEC", "Fundamentals + Valuation", "Refresh-TradingFundamentals.py", ("--write",), "fundamentals-sec-backfill.log", ("10:00",), "sunday",
                    at_login=True),
     TaskDefinition("Candidate-Discovery", "Candidate Discovery", "Discover-TradingCandidates.py", (), "candidate-discovery.log", ("17:35",), time_limit_h=2,
                    root_workdir=True),

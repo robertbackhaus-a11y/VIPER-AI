@@ -34,6 +34,7 @@ COMMANDS: dict[str, tuple[Path, str]] = {
     "viper-ai-backfill-fx-rates": (APP_DIR, "Backfill-TradingFXRatesECB.py"),
     "viper-ai-backfill-events-news": (APP_DIR, "Backfill-TradingEventsNews.py"),
     "viper-ai-backfill-fundamentals-sec": (APP_DIR, "Backfill-TradingFundamentalsSEC.py"),
+    "viper-ai-refresh-fundamentals": (APP_DIR, "Refresh-TradingFundamentals.py"),
     "viper-ai-discover-candidates": (APP_DIR, "Discover-TradingCandidates.py"),
     "viper-ai-market-intelligence": (APP_DIR, "Collect-TradingMarketIntelligence.py"),
 }
@@ -133,6 +134,10 @@ def backfill_events_news() -> int:
 
 def backfill_fundamentals_sec() -> int:
     return _command("viper-ai-backfill-fundamentals-sec")
+
+
+def refresh_fundamentals() -> int:
+    return _command("viper-ai-refresh-fundamentals")
 
 
 def discover_candidates() -> int:

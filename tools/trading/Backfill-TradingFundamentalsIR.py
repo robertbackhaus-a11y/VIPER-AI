@@ -776,55 +776,56 @@ def upsert_fundamental(
             currency =
                 excluded.currency,
 
+            -- a field the parser does not deliver keeps a value filled in by Research-TradingFundamentals.py
+            -- (or a hand-researched period): the parser only replaces what it reads itself
             revenue =
-                excluded.revenue,
+                COALESCE(excluded.revenue, fundamentals.revenue),
 
             gross_profit =
-                excluded.gross_profit,
+                COALESCE(excluded.gross_profit, fundamentals.gross_profit),
 
             operating_income =
-                excluded.operating_income,
+                COALESCE(excluded.operating_income, fundamentals.operating_income),
 
             ebit =
-                excluded.ebit,
+                COALESCE(excluded.ebit, fundamentals.ebit),
 
             ebitda =
-                excluded.ebitda,
+                COALESCE(excluded.ebitda, fundamentals.ebitda),
 
             net_income =
-                excluded.net_income,
+                COALESCE(excluded.net_income, fundamentals.net_income),
 
             eps_basic =
-                excluded.eps_basic,
+                COALESCE(excluded.eps_basic, fundamentals.eps_basic),
 
             eps_diluted =
-                excluded.eps_diluted,
+                COALESCE(excluded.eps_diluted, fundamentals.eps_diluted),
 
             operating_cash_flow =
-                excluded.operating_cash_flow,
+                COALESCE(excluded.operating_cash_flow, fundamentals.operating_cash_flow),
 
             capex =
-                excluded.capex,
+                COALESCE(excluded.capex, fundamentals.capex),
 
             free_cash_flow =
-                excluded.free_cash_flow,
+                COALESCE(excluded.free_cash_flow, fundamentals.free_cash_flow),
 
             cash =
-                excluded.cash,
+                COALESCE(excluded.cash, fundamentals.cash),
 
             total_debt =
-                excluded.total_debt,
+                COALESCE(excluded.total_debt, fundamentals.total_debt),
 
             total_assets =
-                excluded.total_assets,
+                COALESCE(excluded.total_assets, fundamentals.total_assets),
 
             total_liabilities =
-                excluded.total_liabilities,
+                COALESCE(excluded.total_liabilities, fundamentals.total_liabilities),
 
             total_equity =
-                excluded.total_equity,
+                COALESCE(excluded.total_equity, fundamentals.total_equity),
 
-            -- a parser without a count keeps a count filled in by Research-TradingFundamentals.py
             shares_outstanding =
                 COALESCE(excluded.shares_outstanding, fundamentals.shares_outstanding),
 
@@ -3700,18 +3701,10 @@ def write_company(
 
     try:
 
-        conn.execute(
-            """
-            DELETE FROM fundamentals
-            WHERE security_id = ?
-              AND source_id = ?
-            """,
-            (
-                security_id,
-                ir_source_id,
-            ),
-        )
-
+        # No DELETE of the company's "Company IR" rows: periods the parser
+        # does not deliver (hand-researched or written by
+        # Research-TradingFundamentals.py under the same source) stay, and a
+        # delivered period keeps the fields the parser leaves empty.
         count = 0
 
         for row in rows:
@@ -3857,16 +3850,89 @@ def report(
 # MAIN
 # ============================================================
 
+# The company parsers of this file: (security_id, name, parser).  A parser
+# reads one company's own published documents; it is not a generic IR
+# crawler.  Fundamentals completion (fundamentals_completion.py) uses this
+# list to know which securities have an IR parser at all.
+PARSERS = (
+    (4, "ASML Holding", lambda: parse_asml()),
+    (17, "ING Groep N.V.", lambda: parse_ing()),
+    (2, "TSMC (ADR)", lambda: parse_tsmc()),
+    (13, "SK hynix Inc.", lambda: parse_sk_hynix()),
+    (50, "BAE Systems", lambda: parse_bae_systems()),
+    (56, "HENSOLDT AG", lambda: parse_hensoldt()),
+)
+
+
+def run(
+    conn,
+    security_ids=None,
+):
+    """Run the parsers (of ``security_ids``, default all) and write their
+    rows.  One company's failure (download, layout change) does not stop
+    the others.  Returns {security_id: {"status": "ok" | "no_rows" |
+    "failed", "rows": n, "error": text}}."""
+
+    ir_source_id = get_source_id(
+        conn,
+        "Company IR",
+    )
+
+    results = {}
+
+    for security_id, name, parser in PARSERS:
+
+        if security_ids is not None and security_id not in security_ids:
+            continue
+
+        print(
+            f"Downloading / parsing {name}..."
+        )
+
+        try:
+
+            rows = parser()
+
+            print(
+                f"    parsed rows: {len(rows)}"
+            )
+
+            written = write_company(
+                conn,
+                ir_source_id,
+                security_id,
+                name,
+                rows,
+            )
+
+            results[security_id] = {
+                "status": "ok" if written else "no_rows",
+                "rows": written,
+                "error": None,
+            }
+
+        except Exception as exc:
+
+            print(
+                f"    -> ERROR: {exc}"
+            )
+
+            results[security_id] = {
+                "status": "failed",
+                "rows": 0,
+                "error": str(exc),
+            }
+
+        print()
+
+    return results
+
+
 def main():
 
     conn = connect()
 
     try:
-
-        ir_source_id = get_source_id(
-            conn,
-            "Company IR",
-        )
 
         print()
         print(
@@ -3880,136 +3946,21 @@ def main():
         )
         print()
 
-        print(
-            "Downloading / parsing ASML..."
-        )
-
-        asml_rows = parse_asml()
-
-        print(
-            f"    parsed rows: {len(asml_rows)}"
-        )
-
-        print()
-
-        print(
-            "Downloading / parsing ING..."
-        )
-
-        ing_rows = parse_ing()
-
-        print(
-            f"    parsed rows: {len(ing_rows)}"
-        )
-
-        print()
-
-        print(
-            "Downloading / parsing TSMC..."
-        )
-
-        tsmc_rows = parse_tsmc()
-
-        print(
-            f"    parsed rows: {len(tsmc_rows)}"
-        )
-
-        print()
-
-        print(
-            "Downloading / parsing SK hynix..."
-        )
-
-        sk_hynix_rows = parse_sk_hynix()
-
-        print(
-            f"    parsed rows: {len(sk_hynix_rows)}"
-        )
-
-        print()
-
-        print(
-            "Loading BAE Systems (local snapshot -- see code comment)..."
-        )
-
-        bae_rows = parse_bae_systems()
-
-        print(
-            f"    parsed rows: {len(bae_rows)}"
-        )
-
-        print()
-
-        print(
-            "Downloading / parsing HENSOLDT..."
-        )
-
-        hensoldt_rows = parse_hensoldt()
-
-        print(
-            f"    parsed rows: {len(hensoldt_rows)}"
-        )
-
-        print()
-
-        total = 0
-
-        total += write_company(
+        results = run(
             conn,
-            ir_source_id,
-            4,
-            "ASML Holding",
-            asml_rows,
-        )
-
-        total += write_company(
-            conn,
-            ir_source_id,
-            17,
-            "ING Groep N.V.",
-            ing_rows,
-        )
-
-        total += write_company(
-            conn,
-            ir_source_id,
-            2,
-            "TSMC (ADR)",
-            tsmc_rows,
-        )
-
-        total += write_company(
-            conn,
-            ir_source_id,
-            13,
-            "SK hynix Inc.",
-            sk_hynix_rows,
-        )
-
-        total += write_company(
-            conn,
-            ir_source_id,
-            50,
-            "BAE Systems",
-            bae_rows,
-        )
-
-        total += write_company(
-            conn,
-            ir_source_id,
-            56,
-            "HENSOLDT AG",
-            hensoldt_rows,
         )
 
         print()
         print(
-            f"Rows written: {total}"
+            f"Rows written: {sum(r['rows'] for r in results.values())}"
         )
 
         report(
             conn,
-            ir_source_id,
+            get_source_id(
+                conn,
+                "Company IR",
+            ),
         )
 
     finally:

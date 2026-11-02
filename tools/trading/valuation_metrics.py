@@ -11,12 +11,14 @@ Inputs (all point-in-time for the price date, with the same visibility rule as t
 
 * price: the latest ``market_data`` close on or before the date, in the security's trading currency; a provider quote unit such as ``GBp`` (pence) is turned into
   its ISO currency with ``fx_resolver.normalize_quote_unit``.  Market cap = price x shares outstanding, in the price currency;
-* TTM flows (revenue, net income, EBITDA, free cash flow): a stored ``ttm`` row if there is one, else the latest annual row bridged to the latest interim period of
-  the next fiscal year, ``TTM = FY + YTD(current) - YTD(prior year)``, from rows of the same source and currency.  A YTD is a ``semiannual``/``nine_month`` row or the
-  sum of the discrete quarters 1..n; a missing quarter leaves that flow empty, it is never filled in;
-* balance sheet (equity, cash, debt): the latest visible fundamentals row of that source;
-* shares outstanding: the newest count of that source not older than the TTM anchor, else the newest such count of another source of the same company (for
-  example an IR row when the TTM comes from SEC).  The count must pass ``shares_conflict`` and ``shares_jump``.  A depositary receipt (ADR/ADS) turns the filed
+* TTM flows (revenue, net income, EBITDA, free cash flow): the newest of a stored ``ttm`` row, the sum of the four newest consecutive discrete quarters of one
+  source (``4q``), the latest annual row bridged to the latest interim period of the next fiscal year, ``TTM = FY + YTD(current) - YTD(prior year)``, from rows of
+  the same source and currency, and the latest annual row itself (``trailing``).  A YTD is a ``semiannual``/``nine_month`` row or the sum of the discrete quarters
+  1..n; a missing quarter leaves that flow empty, it is never filled in.  When the bridge lacks a period, the annual row stays the TTM and the period is a gap;
+* balance sheet (equity, cash, debt): the latest visible fundamentals row of that source that carries balance-sheet values;
+* shares outstanding: the newest count of that source not older than the latest annual row, else the newest such count of another source of the same company
+  (for example an IR row when the TTM comes from SEC).  The count must pass ``shares_conflict`` and ``shares_jump``; a count that fails is skipped with its reason
+  and the next one is tried.  A depositary receipt (ADR/ADS) turns the filed
   count, which counts underlying shares, into depositary shares with the reviewed ratio of ``universe/adr_ratios_v1.json`` valid on the count's date
   (``depositary_shares``); without such a ratio it keeps no count.
 
@@ -25,7 +27,8 @@ pairs, or both EUR rates of one ECB day): balance-sheet values at the balance-sh
 that group stay empty, and so do the multiples that need them; nothing is estimated.
 
 A multiple is left empty, with its reason, when an input is missing or the denominator is not positive (no P/E from a loss, no EV multiple from a negative EV).
-An empty multiple never drops the others.
+An empty multiple never drops the others.  Every missing input is also returned as data (``ValuationRow.gaps``: the field or ``period`` / ``fx`` / ``adr_ratio`` /
+``implausible``, the periods it is missing in and why), which ``fundamentals_completion.py`` turns into its gap analysis.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ ADR_RATIOS_FILE = Path(__file__).resolve().parent / "universe" / "adr_ratios_v1.
 
 MULTIPLES = ("pe_ttm", "ps_ttm", "pb", "ev_revenue", "ev_ebitda", "p_fcf", "fcf_yield_pct")
 FLOWS = ("revenue", "net_income", "ebitda", "free_cash_flow", "operating_cash_flow", "capex")
+BALANCE = ("total_equity", "cash", "total_debt")
 YTD_MONTHS = {"semiannual": 6, "nine_month": 9}
 
 # Same visibility as analysis_engine._FUNDAMENTAL_VISIBLE_SQL: filed on or before the date, or (without a filing date) fetched on or before it.  Parameters: as_of x3.
@@ -98,6 +102,17 @@ class ValuationRow:
     p_fcf: Optional[float] = None
     fcf_yield_pct: Optional[float] = None
     missing: list[str] = field(default_factory=list)
+    # The missing inputs as data for the completion of the fundamentals (fundamentals_completion.py); not stored with the row.
+    gaps: list[dict] = field(default_factory=list)
+
+
+def _gap(gap: str, periods: list[str], detail: str, **extra) -> dict:
+    """One missing valuation input: ``gap`` is a field of ``GAP_FIELDS`` or ``period`` / ``fx`` / ``adr_ratio`` / ``implausible``."""
+    return {"gap": gap, "periods": sorted(set(periods)), "detail": detail, **extra}
+
+
+def _label(row: sqlite3.Row) -> str:
+    return f"{row['period_end']} {row['period_type']}"
 
 
 # -- formulas ---------------------------------------------------------------------------------------------------------------------------
@@ -168,17 +183,26 @@ def _visible_rows(conn: sqlite3.Connection, security_id: int, as_of: str) -> lis
     ).fetchall()
 
 
-def _ytd(rows: list[sqlite3.Row], fiscal_year: int, months: int, metric: str) -> Optional[float]:
-    """The YTD value of ``metric`` over the first ``months`` of ``fiscal_year``: one YTD row, or the sum of its discrete quarters."""
+def _ytd_rows(rows: list[sqlite3.Row], fiscal_year: int, months: int) -> tuple[list[sqlite3.Row], list[str]]:
+    """(rows, missing period labels) that make up the first ``months`` of ``fiscal_year``: one YTD row, or its discrete quarters 1..n."""
     fy = [r for r in rows if r["fiscal_year"] == fiscal_year]
     for r in fy:
         if (YTD_MONTHS.get(r["period_type"]) == months) or (months == 3 and r["period_type"] == "quarterly" and r["fiscal_quarter"] == 1):
-            return None if r[metric] is None else float(r[metric])
+            return [r], []
     quarters = {r["fiscal_quarter"]: r for r in fy if r["period_type"] == "quarterly"}
     needed = range(1, months // 3 + 1)
-    if any(q not in quarters or quarters[q][metric] is None for q in needed):
+    missing = [f"FY{fiscal_year} Q{q}" for q in needed if q not in quarters]
+    if missing:
+        missing = [f"FY{fiscal_year} {'H1' if months == 6 else '9M' if months == 9 else 'Q1'} (YTD row or quarters {', '.join(f'Q{q}' for q in needed)})"]
+    return [quarters[q] for q in needed if q in quarters], missing
+
+
+def _ytd(rows: list[sqlite3.Row], fiscal_year: int, months: int, metric: str) -> Optional[float]:
+    """The YTD value of ``metric`` over the first ``months`` of ``fiscal_year``: one YTD row, or the sum of its discrete quarters."""
+    parts, missing = _ytd_rows(rows, fiscal_year, months)
+    if missing or not parts or any(r[metric] is None for r in parts):
         return None
-    return sum(float(quarters[q][metric]) for q in needed)
+    return sum(float(r[metric]) for r in parts)
 
 
 def _interim_months(row: sqlite3.Row) -> Optional[int]:
@@ -189,29 +213,97 @@ def _interim_months(row: sqlite3.Row) -> Optional[int]:
     return None
 
 
-def ttm_flows(rows: list[sqlite3.Row]) -> tuple[dict[str, Optional[float]], Optional[str], Optional[str], Optional[sqlite3.Row]]:
-    """(TTM flows, TTM period end, method, anchor row) from the visible rows, newest first."""
-    empty = {m: None for m in FLOWS}
+def _values(row: sqlite3.Row) -> dict[str, Optional[float]]:
+    return {m: (None if row[m] is None else float(row[m])) for m in FLOWS}
+
+
+def _four_quarters(rows: list[sqlite3.Row]) -> Optional[list[sqlite3.Row]]:
+    """The four newest discrete quarters of one source and currency (that of the newest quarter), newest first, when they follow each other
+    without a hole (period ends about three months apart); None otherwise."""
+    quarters = [r for r in rows if r["period_type"] == "quarterly"]
+    if not quarters:
+        return None
+    newest = quarters[0]
+    four: list[sqlite3.Row] = []
+    for r in quarters:
+        if r["source_id"] == newest["source_id"] and r["currency"] == newest["currency"] and all(r["period_end"] != q["period_end"] for q in four):
+            four.append(r)
+    four = four[:4]
+    if len(four) < 4:
+        return None
+    for later, earlier in zip(four, four[1:]):
+        if not 80 <= (date.fromisoformat(later["period_end"][:10]) - date.fromisoformat(earlier["period_end"][:10])).days <= 100:
+            return None
+    return four
+
+
+@dataclass
+class Ttm:
+    """The trailing twelve months of one security: the flows, their period end and method, the anchor row (its source decides the balance sheet
+    and the shares), the rows the flows were taken from, and the periods a better (newer) TTM still lacks."""
+
+    flows: dict[str, Optional[float]]
+    period_end: Optional[str] = None
+    method: Optional[str] = None
+    anchor: Optional[sqlite3.Row] = None
+    used: list = field(default_factory=list)
+    missing_periods: list[str] = field(default_factory=list)
+
+
+def trailing(rows: list[sqlite3.Row]) -> Ttm:
+    """The TTM of the visible rows (newest first): the newest of
+
+    * a stored ``ttm`` row;
+    * the sum of the four newest consecutive discrete quarters of one source (``4q``);
+    * the latest annual row bridged to the latest interim period of the next fiscal year, ``FY + YTD(current) - YTD(prior year)`` (``annual+ytdNm``);
+    * the latest annual row on its own (``annual``).
+
+    A bridge that cannot be built (an interim period of the prior year is not stored) or gives no flow at all leaves the latest annual row as the
+    TTM; the missing periods are recorded.  Flows of different methods or periods are never mixed.
+    """
+    candidates: list[Ttm] = []
     ttm = next((r for r in rows if r["period_type"] == "ttm"), None)
-    annual = next((r for r in rows if r["period_type"] == "annual"), None)
-    if ttm is not None and (annual is None or ttm["period_end"] >= annual["period_end"]):
-        return {m: (None if ttm[m] is None else float(ttm[m])) for m in FLOWS}, ttm["period_end"], "stored_ttm", ttm
-    if annual is None or annual["fiscal_year"] is None:
-        return empty, None, None, None
-    same = [r for r in rows if r["source_id"] == annual["source_id"] and r["currency"] == annual["currency"]]
-    later = [r for r in same if r["period_end"] > annual["period_end"] and r["period_type"] != "annual"]
-    if not later:
-        return {m: (None if annual[m] is None else float(annual[m])) for m in FLOWS}, annual["period_end"], "annual", annual
-    latest = later[0]
-    months = _interim_months(latest)
-    if months is None or latest["fiscal_year"] != annual["fiscal_year"] + 1:
-        return empty, latest["period_end"], None, annual
-    flows: dict[str, Optional[float]] = {}
-    for metric in FLOWS:
-        current = _ytd(same, annual["fiscal_year"] + 1, months, metric)
-        prior = _ytd(same, annual["fiscal_year"], months, metric)
-        flows[metric] = None if annual[metric] is None or current is None or prior is None else float(annual[metric]) + current - prior
-    return flows, latest["period_end"], f"annual+ytd{months}m", annual
+    if ttm is not None:
+        candidates.append(Ttm(_values(ttm), ttm["period_end"], "stored_ttm", ttm, [ttm]))
+    four = _four_quarters(rows)
+    if four is not None:
+        flows = {m: (None if any(q[m] is None for q in four) else sum(float(q[m]) for q in four)) for m in FLOWS}
+        candidates.append(Ttm(flows, four[0]["period_end"], "4q", four[-1], four))
+    annual = next((r for r in rows if r["period_type"] == "annual" and r["fiscal_year"] is not None), None)
+    missing_periods: list[str] = []
+    if annual is not None:
+        same = [r for r in rows if r["source_id"] == annual["source_id"] and r["currency"] == annual["currency"]]
+        later = [r for r in same if r["period_end"] > annual["period_end"] and r["period_type"] != "annual"]
+        latest = later[0] if later else None
+        months = _interim_months(latest) if latest is not None else None
+        if latest is not None and (months is None or latest["fiscal_year"] != annual["fiscal_year"] + 1):
+            missing_periods.append(f"FY{annual['fiscal_year'] + 1} annual (latest interim {latest['period_end']} is not in the fiscal year after "
+                                   f"the annual {annual['period_end']})")
+        elif latest is not None:
+            current, missing_current = _ytd_rows(same, annual["fiscal_year"] + 1, months)
+            prior, missing_prior = _ytd_rows(same, annual["fiscal_year"], months)
+            missing_periods += missing_current + missing_prior
+            if not missing_periods:
+                flows = {}
+                for metric in FLOWS:
+                    cur, pri = _ytd(same, annual["fiscal_year"] + 1, months, metric), _ytd(same, annual["fiscal_year"], months, metric)
+                    flows[metric] = None if annual[metric] is None or cur is None or pri is None else float(annual[metric]) + cur - pri
+                if any(v is not None for v in flows.values()):
+                    candidates.append(Ttm(flows, latest["period_end"], f"annual+ytd{months}m", annual, [annual, *current, *prior]))
+        candidates.append(Ttm(_values(annual), annual["period_end"], "annual", annual, [annual]))
+    if not candidates:
+        return Ttm({m: None for m in FLOWS})
+    order = {"stored_ttm": 0, "4q": 1, "annual": 3}
+    chosen = max(candidates, key=lambda c: (c.period_end, -order.get(c.method, 2)))
+    if chosen.method == "annual" and missing_periods:
+        chosen.missing_periods = missing_periods
+    return chosen
+
+
+def ttm_flows(rows: list[sqlite3.Row]) -> tuple[dict[str, Optional[float]], Optional[str], Optional[str], Optional[sqlite3.Row]]:
+    """(TTM flows, TTM period end, method, anchor row) from the visible rows, newest first (see ``trailing``)."""
+    t = trailing(rows)
+    return t.flows, t.period_end, t.method, t.anchor
 
 
 def shares_conflict(row: Optional[sqlite3.Row]) -> Optional[str]:
@@ -342,21 +434,28 @@ def calculate(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] =
         rows = _visible_rows(conn, int(security_id), price_date)
         if not rows:
             return None
-        flows, ttm_end, method, anchor = ttm_flows(rows)
+        ttm = trailing(rows)
+        flows, ttm_end, method, anchor = ttm.flows, ttm.period_end, ttm.method, ttm.anchor
         # GBp (pence) -> GBP x0.01: a quote unit, not an FX conversion.
         price_currency, price_factor = fx_resolver.normalize_quote_unit(price["currency"])
         row = ValuationRow(security_id=int(security_id), as_of_date=price_date, price=float(price["close"]) * price_factor,
                            price_currency=price_currency or (price["currency"] or "").upper() or None)
         notes: list[str] = []
+        gaps = row.gaps
         if anchor is None:
-            notes.append("ttm: no annual fundamentals row")
-        elif method is None:
-            notes.append(f"ttm: latest interim period {ttm_end} cannot be bridged to the annual {anchor['period_end']}")
-        elif ttm_end and (date.fromisoformat(price_date) - date.fromisoformat(ttm_end[:10])).days > TTM_MAX_AGE_DAYS:
+            notes.append("ttm: no annual fundamentals row and no four consecutive quarters")
+            gaps.append(_gap("period", ["latest fiscal year (annual)"], "no annual fundamentals row and no four consecutive quarters"))
+        elif ttm.missing_periods:
+            notes.append(f"ttm: latest interim period cannot be bridged to the annual {anchor['period_end']} ({'; '.join(ttm.missing_periods)} missing); "
+                         "the annual figures are used")
+            gaps.append(_gap("period", ttm.missing_periods, f"TTM bridge to the annual {anchor['period_end']} needs these periods"))
+        if ttm_end and (date.fromisoformat(price_date) - date.fromisoformat(ttm_end[:10])).days > TTM_MAX_AGE_DAYS:
             notes.append(f"ttm: period end {ttm_end} is older than {TTM_MAX_AGE_DAYS} days")
+            gaps.append(_gap("period", [f"periods after {ttm_end}"], f"TTM period end {ttm_end} is older than {TTM_MAX_AGE_DAYS} days"))
             flows = {m: None for m in FLOWS}
         source_rows = [r for r in rows if anchor is None or r["source_id"] == anchor["source_id"]] or rows
-        balance = source_rows[0]
+        # Balance sheet: the newest row of that source that carries one (an interim income statement can come without it).
+        balance = next((r for r in source_rows if any(r[k] is not None for k in BALANCE)), source_rows[0])
         row.currency = (balance["currency"] or (anchor["currency"] if anchor is not None else None) or "").upper() or None
         row.ttm_period_end, row.ttm_method = (ttm_end if method else None), method
         row.balance_sheet_period_end = balance["period_end"]
@@ -365,33 +464,57 @@ def calculate(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] =
         if fcf is None and flows["operating_cash_flow"] is not None and flows["capex"] is not None:
             fcf = flows["operating_cash_flow"] - abs(flows["capex"])
         row.free_cash_flow_ttm = fcf
+        if method and not any(g["gap"] == "period" and "older than" in g["detail"] for g in gaps):
+            for metric in ("revenue", "net_income", "ebitda", "operating_cash_flow"):
+                if flows[metric] is None:
+                    gaps.append(_gap(metric, [_label(r) for r in ttm.used if r[metric] is None], f"{metric} TTM ({method}) unavailable"))
+            if fcf is None:
+                lacking = [_label(r) for r in ttm.used if r["free_cash_flow"] is None and (r["operating_cash_flow"] is None or r["capex"] is None)]
+                gaps.append(_gap("free_cash_flow", lacking, f"free_cash_flow TTM ({method}) unavailable: capex or operating_cash_flow missing"))
         row.total_equity, row.cash, row.total_debt = balance["total_equity"], balance["cash"], balance["total_debt"]
-        # Shares: the newest count of the same source not older than the TTM anchor, else the newest such count of another source.
-        def newest_count(candidates: list[sqlite3.Row]) -> Optional[sqlite3.Row]:
-            return next((r for r in candidates if r["shares_outstanding"] is not None
-                         and (anchor is None or r["period_end"] >= anchor["period_end"])), None)
-        shares_row = newest_count(source_rows) or newest_count(rows)
+        for name in BALANCE:
+            if balance[name] is None:
+                gaps.append(_gap(name, [_label(balance)], f"{name} missing in the balance sheet of {balance['period_end']}"))
+        # Shares: the newest count of the same source not older than the latest annual row (else the TTM anchor), then the newest such count of
+        # another source.  A count that fails the checks is skipped with its reason; the next candidate is tried.
+        floor = next((r["period_end"] for r in rows if r["period_type"] == "annual"), anchor["period_end"] if anchor is not None else None)
+        candidates = [r for r in source_rows + [r for r in rows if r not in source_rows]
+                      if r["shares_outstanding"] is not None and (floor is None or r["period_end"] >= floor)]
+        shares_row, rejected = None, []
+        for candidate in candidates:
+            if float(candidate["shares_outstanding"]) <= 0:
+                rejected.append(f"{float(candidate['shares_outstanding']):,.0f} on {candidate['period_end']} is not positive")
+                continue
+            conflict = shares_conflict(candidate) or shares_jump(rows, candidate)
+            if conflict:
+                rejected.append(conflict)
+                continue
+            shares_row = candidate
+            break
+        notes += [f"shares_outstanding: {reason}" for reason in rejected]
         row.shares_outstanding = None if shares_row is None else float(shares_row["shares_outstanding"])
-        if row.shares_outstanding is not None and row.shares_outstanding <= 0:
-            notes.append(f"shares_outstanding: {row.shares_outstanding:,.0f} on {shares_row['period_end']} is not positive")
-            row.shares_outstanding = None
-        conflict = shares_conflict(shares_row) if row.shares_outstanding is not None else None
-        conflict = conflict or (shares_jump(rows, shares_row) if row.shares_outstanding is not None else None)
-        if conflict:
-            notes.append(f"shares_outstanding: {conflict}")
-            row.shares_outstanding = None
+        if shares_row is None:
+            wanted = [_label(balance)] if balance["shares_outstanding"] is None else [f"{balance['period_end']} or later"]
+            gaps.append(_gap("implausible" if rejected else "shares_outstanding", wanted,
+                             "shares_outstanding: " + ("; ".join(rejected) if rejected else f"no count on or after {floor}")))
         security = conn.execute("SELECT name, isin, country FROM security WHERE id = ?", (int(security_id),)).fetchone()
         entry = adr_entry(security)
         if row.shares_outstanding is not None and (entry is not None or depositary_receipt(security)):
             # The checks above ran on the underlying count (net income / EPS are per ordinary share); the ratio converts it afterwards.
             row.shares_outstanding, note = depositary_shares(entry, row.shares_outstanding, shares_row["period_end"])
             notes.append(f"shares_outstanding: {note}")
+            if row.shares_outstanding is None:
+                gaps.append(_gap("adr_ratio", [], note))
         if row.currency and row.price_currency and row.currency != row.price_currency:
             # Market cap stays price x shares in the price currency; the fundamentals follow it, each group at the rate of its own date.
+            before = len(notes)
             balance_values = _converted(conn, {"total_equity": row.total_equity, "cash": row.cash, "total_debt": row.total_debt}, row.currency,
                                         row.price_currency, row.balance_sheet_period_end, "balance sheet", notes)
             flow_values = _converted(conn, {"revenue_ttm": row.revenue_ttm, "net_income_ttm": row.net_income_ttm, "ebitda_ttm": row.ebitda_ttm,
                                             "free_cash_flow_ttm": row.free_cash_flow_ttm}, row.currency, row.price_currency, row.ttm_period_end, "TTM", notes)
+            failed = [n for n in notes[before:] if n.startswith("fx:")]
+            if failed:
+                gaps.append(_gap("fx", [], "; ".join(failed), currency=row.currency, target=row.price_currency))
             for name, value in {**balance_values, **flow_values}.items():
                 setattr(row, name, value)
             row.currency = row.price_currency

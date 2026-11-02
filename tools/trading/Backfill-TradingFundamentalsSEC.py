@@ -1418,6 +1418,101 @@ def attach_cover_counts(
     return attached
 
 
+YTD_CASH_FLOWS = (
+    "operating_cash_flow",
+    "capex",
+    # helper of the EBITDA fallback (operating income + D&A), from the
+    # same cash-flow statement
+    "depreciation_amortization",
+)
+
+
+def derive_quarter_cash_flows(
+    taxonomy_data: dict,
+    mapping: dict,
+    concept_cache: dict,
+    records: dict,
+) -> None:
+    """Fill the discrete Q2/Q3 cash flows that a 10-Q reports only year to date.
+
+    A 10-Q states its cash-flow statement for the fiscal year to date (six or
+    nine months), so CompanyFacts has no quarter-long duration for Q2/Q3 and
+    those quarters stayed without operating cash flow, capex and D&A (and so
+    without free cash flow and the EBITDA fallback). The discrete
+    quarter is the difference of two cumulative facts of the same concept,
+    unit and fiscal-year start, three months apart: YTD(quarter end) -
+    YTD(previous quarter end) -- the same verified_derived formula the
+    research tool documents (Q2 = H1 - Q1). Only an empty field is filled;
+    a negative capex or D&A difference is not used.
+    """
+
+    for metric in YTD_CASH_FLOWS:
+
+        # (concept priority, unit, fiscal-year start) -> {end: (value, filed)}
+        cumulative: dict = {}
+
+        for fact in iter_concept_facts(
+            taxonomy_data,
+            mapping.get(metric, []),
+            metric,
+            concept_cache,
+        ):
+            item = fact["item"]
+            days = duration_days(item)
+            if (
+                (item.get("form") or "").upper() not in QUARTER_FORMS
+                or days is None
+                or not 60 <= days <= 300
+                or not item.get("start")
+            ):
+                continue
+            ends = cumulative.setdefault(
+                (fact["concept_priority"], fact["unit"], item["start"]),
+                {},
+            )
+            filed = item.get("filed") or ""
+            known = ends.get(item["end"])
+            # A later filing repeats the span as a comparative; the original filing wins.
+            if known is None or filed < known[1]:
+                try:
+                    ends[item["end"]] = (float(fact["value"]), filed)
+                except (TypeError, ValueError):
+                    continue
+
+        target = "_depreciation_amortization" if metric == "depreciation_amortization" else metric
+
+        for (end, ptype), record in records.items():
+
+            if ptype != "quarterly" or record.get(target) is not None:
+                continue
+
+            for key in sorted(cumulative):
+                ends = cumulative[key]
+                start = parse_date(key[2])
+                if end not in ends or start is None:
+                    continue
+                earlier = [e for e in ends if e < end]
+                if not earlier:
+                    continue
+                previous = max(earlier)
+                this_end, previous_end = parse_date(end), parse_date(previous)
+                if (
+                    this_end is None
+                    or previous_end is None
+                    or not 80 <= (this_end - previous_end).days <= 100
+                    or (this_end - start).days < 150
+                ):
+                    continue
+                value = ends[end][0] - ends[previous][0]
+                if metric != "operating_cash_flow":
+                    value = abs(ends[end][0]) - abs(ends[previous][0])
+                    if value < 0:
+                        break
+                record[target] = value
+                record["_units"][target] = key[1].upper()
+                break
+
+
 # ============================================================
 # BUILD FUNDAMENTALS
 # ============================================================
@@ -1488,6 +1583,13 @@ def build_records(
             metric,
             periods,
         )
+
+    derive_quarter_cash_flows(
+        taxonomy_data,
+        mapping,
+        concept_cache,
+        records,
+    )
 
     shares_periods = extract_shares(
         facts
@@ -2611,6 +2713,86 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run(
+    conn: sqlite3.Connection,
+    security_ids: Optional[set] = None,
+    use_cache: bool = True,
+    timing: Optional[dict] = None,
+) -> dict:
+    """Import the SEC-mapped securities (of ``security_ids``, default all).
+
+    Returns {security_id: {"name", "status": "ok" | "skipped" | "failed",
+    "rows", "error"}} for every imported security; a requested security
+    without an SEC mapping is not in the result. One security's failure
+    does not stop the others.
+    """
+
+    timing = timing if timing is not None else {"http": 0.0, "parse": 0.0, "db": 0.0}
+
+    validate_schema(
+        conn
+    )
+
+    source_id = get_sec_source_id(
+        conn
+    )
+
+    securities = [
+        security
+        for security in get_relevant_sec_securities(
+            conn,
+            source_id,
+        )
+        if security_ids is None or security["id"] in security_ids
+    ]
+
+    results = {}
+
+    for index, security in enumerate(
+        securities,
+        start=1,
+    ):
+
+        print(
+            f"[{index}/{len(securities)}] "
+            f"{security['name']}"
+        )
+
+        try:
+
+            ok, written, _taxonomy = import_security(
+                conn,
+                security,
+                source_id,
+                use_cache,
+                timing,
+            )
+
+            results[security["id"]] = {
+                "name": security["name"],
+                "status": "ok" if ok else "skipped",
+                "rows": written,
+                "error": None,
+            }
+
+        except Exception as exc:
+
+            results[security["id"]] = {
+                "name": security["name"],
+                "status": "failed",
+                "rows": 0,
+                "error": str(exc),
+            }
+
+            print(
+                f"    -> ERROR: {exc}"
+            )
+
+        print()
+
+    return results
+
+
 def main() -> None:
 
     args = parse_args()
@@ -2629,34 +2811,23 @@ def main() -> None:
 
     try:
 
-        validate_schema(
-            conn
-        )
+        requested_ids = set(args.security_ids) if args.security_ids else None
 
-        source_id = get_sec_source_id(
-            conn
-        )
+        if requested_ids:
 
-        securities = get_relevant_sec_securities(
-            conn,
-            source_id,
-        )
+            validate_schema(
+                conn
+            )
 
-        if args.security_ids:
-            requested_ids = set(args.security_ids)
-
-            securities = [
-                security
-                for security in securities
-                if security["id"] in requested_ids
-            ]
-
-            found_ids = {
+            mapped = {
                 security["id"]
-                for security in securities
+                for security in get_relevant_sec_securities(
+                    conn,
+                    get_sec_source_id(conn),
+                )
             }
 
-            missing_ids = requested_ids - found_ids
+            missing_ids = requested_ids - mapped
 
             if missing_ids:
                 raise RuntimeError(
@@ -2679,10 +2850,6 @@ def main() -> None:
         )
 
         print(
-            f"Mapped securities : {len(securities)}"
-        )
-
-        print(
             f"Annual history    : {MAX_ANNUAL_PERIODS}"
         )
 
@@ -2697,77 +2864,12 @@ def main() -> None:
 
         print()
 
-        resolved = 0
-        skipped = 0
-        failed = 0
-        total_rows = 0
-
-        skipped_items = []
-        failed_items = []
-
-        for index, security in enumerate(
-            securities,
-            start=1,
-        ):
-
-            print(
-                f"[{index}/{len(securities)}] "
-                f"{security['name']}"
-            )
-
-            try:
-
-                ok, written, taxonomy = (
-                    import_security(
-                        conn,
-                        security,
-                        source_id,
-                        use_cache,
-                        timing,
-                    )
-                )
-
-                if ok:
-
-                    resolved += 1
-                    total_rows += written
-
-                else:
-
-                    skipped += 1
-
-                    skipped_items.append(
-                        {
-                            "id":
-                                security["id"],
-
-                            "name":
-                                security["name"],
-                        }
-                    )
-
-            except Exception as exc:
-
-                failed += 1
-
-                failed_items.append(
-                    {
-                        "id":
-                            security["id"],
-
-                        "name":
-                            security["name"],
-
-                        "error":
-                            str(exc),
-                    }
-                )
-
-                print(
-                    f"    -> ERROR: {exc}"
-                )
-
-            print()
+        results = run(
+            conn,
+            requested_ids,
+            use_cache,
+            timing,
+        )
 
         print(
             "==============================================="
@@ -2779,54 +2881,48 @@ def main() -> None:
             "==============================================="
         )
 
-        print(
-            f"Imported securities : {resolved}"
-        )
-
-        print(
-            f"Skipped securities  : {skipped}"
-        )
-
-        print(
-            f"Failed securities   : {failed}"
-        )
-
-        print(
-            f"Rows written        : {total_rows}"
-        )
-
-        if skipped_items:
-
-            print()
+        for label, status in (
+            ("Imported securities", "ok"),
+            ("Skipped securities ", "skipped"),
+            ("Failed securities  ", "failed"),
+        ):
             print(
-                "Skipped:"
+                f"{label} : {sum(1 for r in results.values() if r['status'] == status)}"
             )
 
-            for item in skipped_items:
+        print(
+            f"Rows written        : {sum(r['rows'] for r in results.values())}"
+        )
 
+        for title, status in (
+            ("Skipped:", "skipped"),
+            ("Failed:", "failed"),
+        ):
+
+            items = [
+                (security_id, r)
+                for security_id, r in results.items()
+                if r["status"] == status
+            ]
+
+            if items:
+
+                print()
                 print(
-                    f"  {item['id']:>3} | "
-                    f"{item['name']}"
+                    title
                 )
 
-        if failed_items:
+                for security_id, r in items:
 
-            print()
-            print(
-                "Failed:"
-            )
-
-            for item in failed_items:
-
-                print(
-                    f"  {item['id']:>3} | "
-                    f"{item['name']} | "
-                    f"{item['error']}"
-                )
+                    print(
+                        f"  {security_id:>3} | "
+                        f"{r['name']}"
+                        + (f" | {r['error']}" if r["error"] else "")
+                    )
 
         report(
             conn,
-            source_id,
+            get_sec_source_id(conn),
         )
 
         total_elapsed = (

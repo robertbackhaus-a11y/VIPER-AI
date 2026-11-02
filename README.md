@@ -23,7 +23,7 @@ write; the model only interprets. VIPER-AI analyses and simulates only: **it nev
   (LangGraph). A proposal is never an order.
 - **Import:** canonical CSV or Parqet export, always checked as a dry run first.
 - **MCP server:** server-side tool profiles; the profile `read` offers the 17 read-only tools only.
-- **Tasks:** seven scheduled data tasks (market data, ECB FX rates, SEC events and fundamentals, news, ETF holdings). VIPER owns their
+- **Tasks:** seven scheduled data tasks (market data, ECB FX rates, SEC events, news, fundamentals with valuation and automatic gap completion, ETF holdings). VIPER owns their
   definitions; the Windows Task Scheduler and systemd user timers on Linux are only the backends that run them (`viper-ai tasks`).
 
 ## Release state

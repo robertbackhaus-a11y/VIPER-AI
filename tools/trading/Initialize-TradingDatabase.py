@@ -622,6 +622,52 @@ ON valuation_metrics(security_id, as_of_date DESC);
 
 
 -- ============================================================
+-- 13c. FUNDAMENTALS COMPLETION
+-- Lücken je Wertpapier und Bewertungseingabe und die Research-
+-- Aufträge, die sie schließen sollen.
+-- Siehe fundamentals_completion.py / Migrate-TradingFundamentalsCompletion.py.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS fundamentals_research_job (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    security_id         INTEGER NOT NULL,
+    status              TEXT NOT NULL CHECK (status IN ('open', 'done', 'not_available', 'failed')),
+    request_key         TEXT NOT NULL,
+    request_json        TEXT NOT NULL,
+    prompt_path         TEXT,
+    answer_path         TEXT,
+    result_json         TEXT,
+    detail              TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    finished_at         TEXT,
+    FOREIGN KEY (security_id) REFERENCES security(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fundamentals_research_job_open
+ON fundamentals_research_job(security_id) WHERE status = 'open';
+
+CREATE INDEX IF NOT EXISTS idx_fundamentals_research_job_security
+ON fundamentals_research_job(security_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS fundamentals_gap (
+    security_id         INTEGER NOT NULL,
+    gap                 TEXT NOT NULL,
+    status              TEXT NOT NULL CHECK (status IN ('research', 'closed', 'unavailable')),
+    periods             TEXT,
+    detail              TEXT,
+    trail_json          TEXT NOT NULL,
+    research_job_id     INTEGER,
+    first_seen_at       TEXT NOT NULL,
+    checked_at          TEXT NOT NULL,
+    closed_at           TEXT,
+    PRIMARY KEY (security_id, gap),
+    FOREIGN KEY (security_id) REFERENCES security(id) ON DELETE CASCADE,
+    FOREIGN KEY (research_job_id) REFERENCES fundamentals_research_job(id) ON DELETE SET NULL
+);
+
+
+-- ============================================================
 -- 14. EVENTS
 -- Dauerhafte kursrelevante Ereignisse.
 -- ============================================================
@@ -1059,6 +1105,9 @@ VALUES ('swing_campaign_schema_version', '1');
 
 INSERT OR IGNORE INTO metadata(key, value)
 VALUES ('valuation_metrics_schema_version', '1');
+
+INSERT OR IGNORE INTO metadata(key, value)
+VALUES ('fundamentals_completion_schema_version', '1');
 
 INSERT OR IGNORE INTO metadata(key, value)
 VALUES ('database_type', 'swing_trading');

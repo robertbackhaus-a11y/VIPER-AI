@@ -9,7 +9,8 @@ clock times); a task never waits for or starts another one, and no scheduler def
     MarketData        needs nothing from another task (Yahoo + the database); writes market_data / market_snapshot
     FXRates           needs nothing (ECB); writes fx_rates
     EventsNews        needs nothing (SEC / Yahoo); writes events and news
-    Fundamentals-SEC  needs nothing (SEC); weekly and separate; writes fundamentals
+    Fundamentals-SEC  SEC/XBRL + IR parsers + research jobs, then the valuation; weekly; writes fundamentals, valuation_metrics and the gap status.  The
+                      valuation reads market_data and fx_rates -> SOFT on MarketData and FX (without a current price or rate a multiple stays empty)
     Candidate-Discovery
                       reads fx_rates of the database (EUR conversion: a currency without a usable rate is rejected, UNSUPPORTED_CURRENCY; the median daily
                       value in EUR) -> HARD on FX.  It fetches its own Yahoo history, so it does NOT read market_data; it reads no news or events either.
@@ -78,7 +79,11 @@ SPECS: dict[str, TaskSpec] = {
                  "Tageskurse und Snapshots (Yahoo); braucht keinen anderen Task."),
     FXT: TaskSpec(FXT, "FX-Kurse", FX, (), "EUR-Bewertung von USD/GBP/AUD/KRW-Positionen in den MCP-Tools; CNY/NZD für Fundamentals", "EZB-Referenzkurse; braucht keinen anderen Task."),
     EN: TaskSpec(EN, "Events / News", EVENTS_NEWS, (), "Market Intelligence (liest die gespeicherten News und SEC-Events)", "Unternehmens-News und SEC-Events; braucht keinen anderen Task."),
-    FS: TaskSpec(FS, "Fundamentals (SEC)", FUNDAMENTALS, (), "Fundamental-Bewertung der MCP-Tools", "Wöchentlich und eigenständig; schreibt nur neue Filings."),
+    FS: TaskSpec(FS, "Fundamentals + Valuation", FUNDAMENTALS, (
+        Need(MARKET_DATA, MD, SOFT, "die Valuation rechnet mit dem letzten gespeicherten Kurs (ohne Kurs bleibt sie leer)"),
+        Need(FX, FXT, SOFT, "die Valuation rechnet Fundamentals in Fremdwährung mit den gespeicherten EZB-Kursen um (ohne Kurs bleiben diese Werte leer)"),
+    ), "Fundamental-Bewertung und Valuation der MCP-Tools und von Intelligence",
+                 "Wöchentlich: SEC, IR-Parser, Lückenanalyse mit Research-Aufträgen, danach die Valuation; schreibt nur neue Filings."),
     CD: TaskSpec(CD, "Candidate Discovery", DISCOVERY, (
         Need(FX, FXT, HARD, "liest fx_rates für die EUR-Umrechnung (ohne verwendbaren Kurs wird die Währung abgelehnt: UNSUPPORTED_CURRENCY; Median-Handelsvolumen in EUR)"),
     ), "Market Intelligence (Headlines der Kandidaten), get_candidate_discovery", "Holt die Kursverläufe selbst von Yahoo: braucht weder Marktdaten noch News aus der Datenbank."),

@@ -138,7 +138,7 @@ viper_ai/tasks/definitions.py   die sieben Tasks (Name, Skript, Argumente, Zeitp
 | `Trading-MarketData-Backfill` | `Backfill-TradingMarketData.py --write` | täglich 17:15 | 72 h | ja |
 | `Trading-FXRates-Backfill` | `Backfill-TradingFXRatesECB.py --write --quote-currency USD,GBP,AUD,KRW,CNY,NZD` | täglich 17:20 | 72 h | ja |
 | `Trading-EventsNews-Backfill` | `Backfill-TradingEventsNews.py --write` | täglich 17:25 | 72 h | ja |
-| `Trading-Fundamentals-SEC` | `Backfill-TradingFundamentalsSEC.py` | So 10:00 | 72 h | ja |
+| `Trading-Fundamentals-SEC` | `Refresh-TradingFundamentals.py --write` (SEC, IR-Parser, Research-Aufträge, Valuation) | So 10:00 | 72 h | ja |
 | `Trading-Candidate-Discovery` | `Discover-TradingCandidates.py` | täglich 17:35 | 2 h | nein |
 | `Trading-Market-Intelligence` | `Collect-TradingMarketIntelligence.py` | täglich 08:15 und 17:45 | 2 h | nein |
 | `Trading-ETF-Refresh` | `Refresh-TradingEtfData.py --write` | So 11:00 | 1 h | nein |

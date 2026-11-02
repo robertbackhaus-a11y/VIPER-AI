@@ -42,6 +42,7 @@ from fx_resolver import resolve_fx_rate
 from portfolio_context import derive_allocation_guardrails
 from swing_lifecycle import derive_open_lifecycle
 import portfolio_scope
+import fundamentals_completion
 import trading_analytics
 import valuation_metrics
 
@@ -328,8 +329,11 @@ def _build_valuation(
         "price_targets_count": counts["price_targets"],
     }
     row = valuation_metrics.latest(conn, security_id, evaluation_as_of)
+    # What the fundamentals completion knows about the missing inputs: the field, its status and every source tried (fundamentals_completion.py).
+    completion = fundamentals_completion.gap_details(conn, security_id)
     if row is None:
-        return ValuationAnalysis(quality=_module_quality(counts, requested_as_of), **analyst)
+        quality = _module_quality(counts, requested_as_of)
+        return ValuationAnalysis(quality=DataQuality(quality.status, quality.details + completion, quality.as_of), **analyst)
     # The calculated multiples are the valuation data; analyst estimates/ratings/price targets are a separate, later block and do not
     # decide this quality.  Every multiple that could not be calculated keeps the module PARTIAL with its reason.
     missing = tuple(
@@ -341,7 +345,7 @@ def _build_valuation(
     if not present:
         status = AvailabilityStatus.UNAVAILABLE
     return ValuationAnalysis(
-        quality=DataQuality(status, missing if status is not AvailabilityStatus.AVAILABLE else (), row["as_of_date"]),
+        quality=DataQuality(status, missing + completion if status is not AvailabilityStatus.AVAILABLE else (), row["as_of_date"]),
         **analyst,
         source=valuation_metrics.SOURCE_NAME,
         metrics_as_of=row["as_of_date"],

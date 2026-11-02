@@ -220,6 +220,23 @@ const MULTIPLE = { pe_ttm: "KGV", ps_ttm: "KUV", pb: "KBV", ev_revenue: "EV/Umsa
   market_cap: "Marktkapitalisierung", currency: "Multiples (Kurs- und Bilanzwährung verschieden)",
   fx: "Multiples (kein passender FX-Kurs zum Stichtag)" };
 const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(", ")} und ${items[items.length - 1]}` : items[0]);
+// The automatic fundamentals completion (fundamentals_completion.py): "completion shares_outstanding=research [sec=not_mapped, ir=checked_missing, research=job_open #3]".
+const COMPLETION_GAP = { shares_outstanding: "Shares Outstanding", revenue: "Umsatz", net_income: "Nettogewinn", total_equity: "Eigenkapital", cash: "Liquidität",
+  total_debt: "Finanzschulden", ebitda: "EBITDA", operating_cash_flow: "Operating Cash Flow", free_cash_flow: "CapEx/Free Cash Flow",
+  period: "Benötigte Berichtsperiode", fx: "Wechselkurs", adr_ratio: "ADR-Verhältnis", implausible: "Plausibler Wert (gespeicherter Wert unplausibel)" };
+const COMPLETION_STEP = { sec: "SEC", ir: "IR", research: "Research", valuation: "Valuation" };
+const COMPLETION_RESULT = { not_mapped: "keine Zuordnung", no_parser: "kein Parser", checked_missing: "geprüft, nicht vorhanden", no_data: "keine verwertbaren Daten", found: "gefunden",
+  failed: "fehlgeschlagen", not_run: "nicht gelaufen", job_open: "angefordert", answer_applied: "Ergebnis übernommen", not_available: "nicht verfügbar",
+  answer_invalid: "Antwort fehlerhaft", not_applicable: "nicht zuständig", not_needed: "nicht nötig", refreshed: "aktualisiert" };
+const COMPLETION_STATUS = { research: "Nachzug läuft", unavailable: "bleibt echte Lücke" };
+function completionText(gap, status, steps) {
+  const trail = steps.split(", ").filter(Boolean).map((s) => {
+    const [step, result] = s.split("=");
+    const [code, job] = String(result || "").split(" ");
+    return `${COMPLETION_STEP[step] || step} ${COMPLETION_RESULT[code] || code}${job ? ` (${job.replace("#", "Auftrag #")})` : ""}`;
+  });
+  return `${COMPLETION_GAP[gap] || gap} fehlt → ${trail.join(" → ")} → ${COMPLETION_STATUS[status] || status}`;
+}
 function gapTexts(gap) {
   const [area, ...restParts] = String(gap).split(": ");
   const rest = restParts.join(": ");
@@ -232,6 +249,7 @@ function gapTexts(gap) {
   if (multiples.length) out.push(`${name} unvollständig: ${listing(multiples)} nicht berechenbar (Eingaben fehlen)`);
   const rows = [...rest.matchAll(/no (\w+) rows/g)].map((m) => m[1]).filter((t) => t !== "source" && t !== "fundamentals");
   if (rows.length) out.push(`${name} unvollständig: keine ${listing(rows.map((t) => SOURCE_ROWS[t] || t))}`);
+  for (const m of rest.matchAll(/completion (\w+)=(\w+) \[([^\]]*)\]/g)) out.push(completionText(m[1], m[2], m[3]));
   if (out.length) return out;
   // Older analyses: the engine named a converted foreign quote a gap; the conversion worked, so no reason is shown (the code stays listed).
   if (rest === "position and market price currencies differ") return [];

@@ -25,6 +25,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -745,7 +746,8 @@ def reconcile_campaign_transactions(conn: sqlite3.Connection, security_ids: Opti
     _, lifecycle_schema_available, _ = _lifecycle_api()
     if not lifecycle_schema_available(conn):
         return []
-    query = "SELECT id, security_id, opened_at FROM swing_campaign WHERE status = 'open'"
+    per_portfolio = portfolio_scope.strategies_available(conn)
+    query = f"SELECT id, security_id, opened_at, {'portfolio_id' if per_portfolio else 'NULL'} FROM swing_campaign WHERE status = 'open'"
     params: list[Any] = []
     if security_ids is not None:
         ids = sorted({int(item) for item in security_ids})
@@ -753,11 +755,12 @@ def reconcile_campaign_transactions(conn: sqlite3.Connection, security_ids: Opti
             return []
         query += f" AND security_id IN ({','.join('?' * len(ids))})"
         params.extend(ids)
-    by_security: dict[int, list[tuple[int, str]]] = {}
-    for campaign_id, security_id, opened_at in conn.execute(query + " ORDER BY security_id, id", params).fetchall():
-        by_security.setdefault(int(security_id), []).append((int(campaign_id), opened_at))
+    # a campaign belongs to one portfolio: it is reconciled against the transactions and the position of that portfolio only
+    by_security: dict[tuple[Optional[int], int], list[tuple[int, str]]] = {}
+    for campaign_id, security_id, opened_at, portfolio_id in conn.execute(query + " ORDER BY security_id, id", params).fetchall():
+        by_security.setdefault((portfolio_id, int(security_id)), []).append((int(campaign_id), opened_at))
     reports: list[dict[str, Any]] = []
-    for security_id, campaigns in by_security.items():
+    for (portfolio_id, security_id), campaigns in by_security.items():
         if len(campaigns) > 1:
             reports.append({
                 "campaign_id": None, "campaign_ids": [item[0] for item in campaigns], "security_id": security_id, "opened_at": None,
@@ -767,7 +770,8 @@ def reconcile_campaign_transactions(conn: sqlite3.Connection, security_ids: Opti
             })
             continue
         campaign_id, opened_at = campaigns[0]
-        reports.append(_reconcile_one_campaign(conn, campaign_id, security_id, opened_at, write=write, source=source))
+        with portfolio_scope.scoped(conn, portfolio_id) if per_portfolio else nullcontext():
+            reports.append(_reconcile_one_campaign(conn, campaign_id, security_id, opened_at, write=write, source=source))
     return reports
 
 
@@ -1478,8 +1482,14 @@ def _active_assignment(conn: sqlite3.Connection, security_id: int, day: str) -> 
     ).fetchone()
 
 
+def _owner_columns(owner: Optional[int]) -> tuple[str, str, tuple]:
+    """The ``portfolio_id`` column of an insert into ``strategy_assignment`` / ``swing_campaign`` (nothing without per-portfolio strategies)."""
+    return (", portfolio_id", ", ?", (owner,)) if owner is not None else ("", "", ())
+
+
 def _ensure_assignment(
     conn: sqlite3.Connection, security_id: int, *, requested: Optional[str], steps: list[dict[str, Any]], today: str, source: str,
+    owner: Optional[int] = None,
 ) -> dict[str, Any]:
     """Make sure the position has an active strategy assignment; never guess a strategy and never overlap history."""
     active = _active_assignment(conn, security_id, today)
@@ -1499,19 +1509,23 @@ def _ensure_assignment(
     ).fetchone()
     if overlap is not None:
         return {"action": "unclear", "requested": requested, "reason": f"OVERLAPS_ASSIGNMENT_{overlap['id']}"}
+    column, value, owner_value = _owner_columns(owner)
     cursor = conn.execute(
-        "INSERT INTO strategy_assignment(security_id, strategy_type, effective_from, effective_to, source, rationale) VALUES (?, ?, ?, NULL, ?, ?)",
-        (security_id, requested, effective_from, source, f"set at import; effective from the start of the held position ({steps[start]['type']} on {effective_from})"),
+        f"INSERT INTO main.strategy_assignment(security_id, strategy_type, effective_from, effective_to, source, rationale{column}) VALUES (?, ?, ?, NULL, ?, ?{value})",
+        (security_id, requested, effective_from, source, f"set at import; effective from the start of the held position ({steps[start]['type']} on {effective_from})",
+         *owner_value),
     )
     return {"action": "created", "strategy": requested, "effective_from": effective_from, "id": int(cursor.lastrowid)}
 
 
-def _create_campaign(conn: sqlite3.Connection, security_id: int, plan: dict[str, Any], assignment_id: int, source: str) -> int:
+def _create_campaign(conn: sqlite3.Connection, security_id: int, plan: dict[str, Any], assignment_id: int, source: str, owner: Optional[int] = None) -> int:
     rationale = f"initialized by transaction import: {plan['start_basis']}"
+    column, value, owner_value = _owner_columns(owner)
     cursor = conn.execute(
-        """INSERT INTO swing_campaign(security_id, strategy_assignment_id, opened_at, original_quantity, reference_avg_cost,
-                                      reference_currency, status, source, rationale) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
-        (security_id, assignment_id, plan["opened_at"], plan["original_quantity"], plan["reference_avg_cost"], plan["reference_currency"], source, rationale),
+        f"""INSERT INTO main.swing_campaign(security_id, strategy_assignment_id, opened_at, original_quantity, reference_avg_cost,
+                                      reference_currency, status, source, rationale{column}) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?{value})""",
+        (security_id, assignment_id, plan["opened_at"], plan["original_quantity"], plan["reference_avg_cost"], plan["reference_currency"], source, rationale,
+         *owner_value),
     )
     campaign_id = int(cursor.lastrowid)
     conn.execute(
@@ -1584,8 +1598,11 @@ def _initialize_strategies_and_campaigns(
     adapter: ImportAdapter,
     open_items: list[dict[str, Any]],
     start_campaigns: bool = True,
+    owner: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Strategy assignment and (Swing) campaign initialization for every held security; never guesses.  ``start_campaigns=False`` derives no campaign start by itself."""
+    """Strategy assignment and (Swing) campaign initialization for every held security; never guesses.  ``start_campaigns=False`` derives no campaign start by itself.
+
+    With per-portfolio strategies the connection reads the import's portfolio ``owner`` (``portfolio_scope.scoped``) and writes its assignments and campaigns."""
     out: dict[str, Any] = {"assignments": [], "campaigns": [], "reconciliation": [], "campaign_security_ids": []}
     source = f"{adapter.name}_import"
     strategy_ok, lifecycle_ok = _strategy_schema_ok(conn), _lifecycle_available(conn)
@@ -1601,7 +1618,7 @@ def _initialize_strategies_and_campaigns(
         if _position_shares(conn, security_id) <= _EPS:
             continue
         steps = _replay_position(conn, security_id)
-        assignment = _ensure_assignment(conn, security_id, requested=strategies.get(security_id), steps=steps, today=today, source=source)
+        assignment = _ensure_assignment(conn, security_id, requested=strategies.get(security_id), steps=steps, today=today, source=source, owner=owner)
         out["assignments"].append({"security_id": security_id, "symbol": _security_label(conn, security_id), **assignment})
         action = assignment["action"]
         if action == "required":
@@ -1641,7 +1658,7 @@ def _initialize_strategies_and_campaigns(
             continue
         conn.execute("SAVEPOINT campaign_init")
         try:
-            campaign_id = _create_campaign(conn, security_id, plan, int(assignment["id"]), source)
+            campaign_id = _create_campaign(conn, security_id, plan, int(assignment["id"]), source, owner)
             reports = reconcile_campaign_transactions(conn, [security_id], write=True, source=adapter.reconciliation_source)
             report = reports[0] if reports else None
             clean, delta = _lifecycle_clean(conn, security_id)
@@ -1841,15 +1858,18 @@ def apply_import_plan(
         campaign_dates = _resolve_option_keys(index, options.campaign_opened_at, "--campaign-opened-at")
         file_transaction_ids = {r.matched_transaction_id for r in [*fresh.records, *finals] if r.matched_transaction_id is not None}
         open_items: list[dict[str, Any]] = []
-        phase = _initialize_strategies_and_campaigns(
-            conn, candidates=candidates, file_transaction_ids=file_transaction_ids, strategies=strategies, campaign_dates=campaign_dates,
-            today=today, adapter=adapter, open_items=open_items, start_campaigns=options.start_campaigns,
-        )
+        owner = portfolio_scope.strategy_owner(conn, portfolio_id)
+        with portfolio_scope.scoped(conn, owner):
+            phase = _initialize_strategies_and_campaigns(
+                conn, candidates=candidates, file_transaction_ids=file_transaction_ids, strategies=strategies, campaign_dates=campaign_dates,
+                today=today, adapter=adapter, open_items=open_items, start_campaigns=options.start_campaigns, owner=owner,
+            )
         reconcile_ids = sorted(set(affected) | set(phase["campaign_security_ids"]))
         # A security with a row the source no longer contains has a doubtful position: reconciling its campaign against it would turn the doubt into events.
         doubtful = {item["security_id"] for transaction_id, item in stale.items() if transaction_id not in options.remove_transactions}
         remaining_ids = [security_id for security_id in reconcile_ids if security_id not in phase["campaign_security_ids"] and security_id not in doubtful]
-        reconciliation = [*phase["reconciliation"], *reconcile_campaign_transactions(conn, remaining_ids, write=True, source=adapter.reconciliation_source)]
+        with portfolio_scope.scoped(conn, owner):  # only the campaigns of the import's portfolio
+            reconciliation = [*phase["reconciliation"], *reconcile_campaign_transactions(conn, remaining_ids, write=True, source=adapter.reconciliation_source)]
 
         audit = _duplicate_audit(conn)
         if audit["exact_economic_duplicates"] or audit["duplicate_external_ids"]:
@@ -1867,12 +1887,13 @@ def apply_import_plan(
                                    "status": report["status"], "detail": [r["reason"] for r in report["manual_review_required"]] or report["ambiguous"]})
                 flagged.add((CAMPAIGN_RECONCILIATION_REQUIRED, report["security_id"]))
         if _lifecycle_available(conn):
-            for security_id in candidates:
-                if _position_shares(conn, security_id) > _EPS and _open_campaign_id(conn, security_id) is not None and (CAMPAIGN_RECONCILIATION_REQUIRED, security_id) not in flagged:
-                    clean, delta = _lifecycle_clean(conn, security_id)
-                    if not clean:
-                        open_items.append({"code": CAMPAIGN_RECONCILIATION_REQUIRED, "security_id": security_id, "symbol": _security_label(conn, security_id),
-                                           "detail": f"campaign quantity differs from the position by {delta}"})
+            with portfolio_scope.scoped(conn, owner):
+                for security_id in candidates:
+                    if _position_shares(conn, security_id) > _EPS and _open_campaign_id(conn, security_id) is not None and (CAMPAIGN_RECONCILIATION_REQUIRED, security_id) not in flagged:
+                        clean, delta = _lifecycle_clean(conn, security_id)
+                        if not clean:
+                            open_items.append({"code": CAMPAIGN_RECONCILIATION_REQUIRED, "security_id": security_id, "symbol": _security_label(conn, security_id),
+                                               "detail": f"campaign quantity differs from the position by {delta}"})
         for security_id in candidates:
             if _position_shares(conn, security_id) > _EPS and _market_data_missing(conn, security_id):
                 open_items.append({"code": MARKET_DATA_MISSING, "security_id": security_id, "symbol": _security_label(conn, security_id),
@@ -1893,7 +1914,8 @@ def apply_import_plan(
         if skipped_historical:
             open_items.append({"code": HISTORICAL_ROWS_NOT_IMPORTED, "security_id": None, "symbol": None, "detail": f"{len(skipped_historical)} historical row(s) skipped; use --include-historical", "rows": skipped_historical[:50]})
 
-        lifecycle = _lifecycle_report(conn, reconcile_ids, finals, reconciliation)
+        with portfolio_scope.scoped(conn, owner):
+            lifecycle = _lifecycle_report(conn, reconcile_ids, finals, reconciliation)
         after = int(conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
         new_positions = sum(
             1 for security_id in candidates if shares_before.get(security_id, 0.0) <= _EPS and _position_shares(conn, security_id) > _EPS

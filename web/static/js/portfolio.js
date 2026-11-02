@@ -123,5 +123,5 @@ function priceChart(node, bars, txs) {
   chart.timeScale().fitContent();
 }
 
-const strategyText = (v) => ({ swing: "Swing", long_term: "Long-Term", unknown: "unbekannt" }[v] || v || DASH);
+const strategyText = (v) => ({ swing: "Swing", long_term: "Long-Term", unknown: "unbekannt", mixed: "Mixed" }[v] || v || DASH);
 const box = (label, value) => el("div", { class: "kpi" }, el("div", { class: "label" }, label), el("div", { class: "value" }, value));

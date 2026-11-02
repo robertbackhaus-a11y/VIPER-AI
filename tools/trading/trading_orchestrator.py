@@ -15,6 +15,7 @@ from analysis_engine import build_analysis_snapshot, build_portfolio_context
 from decision_engine import decide
 from orchestrator_presentation import build_presentation_summary, format_orchestrator_summary
 from portfolio_action_planner import build_portfolio_action_plan, unavailable_plan
+import portfolio_scope
 from portfolio_risk import load_risk_inputs
 from strategy_config import StrategyConfig
 from swing_promotion import evaluate_swing_candidates
@@ -69,7 +70,7 @@ def _active_swing_zero_positions(conn: sqlite3.Connection, evaluation_as_of: str
     if _table_exists(conn, "swing_campaign"):
         campaign_clause = " AND NOT EXISTS (SELECT 1 FROM swing_campaign c WHERE c.security_id=sa.security_id AND c.status='open')"
     rows = conn.execute(
-        """SELECT sa.security_id FROM strategy_assignment sa
+        """SELECT DISTINCT sa.security_id FROM strategy_assignment sa
            LEFT JOIN positions p ON p.security_id=sa.security_id AND p.shares>0
            WHERE sa.strategy_type='swing' AND sa.effective_from<=?
              AND (sa.effective_to IS NULL OR sa.effective_to>=?)
@@ -110,6 +111,16 @@ def _security_record(snapshot, decision, priority: str) -> dict[str, Any]:
         "decision": to_primitive(decision),
         "priority": priority,
     }
+
+
+def _with_portfolio_strategies(record: dict[str, Any], parts: Optional[list[dict[str, Any]]]) -> dict[str, Any]:
+    """The total of a security in several portfolios: their strategies and campaigns stay visible side by side (``strategy_by_portfolio``); different
+    strategies make the record's strategy ``mixed`` instead of one of them."""
+    if parts:
+        record["strategy_by_portfolio"] = parts
+        if portfolio_scope.total_strategy(parts) == portfolio_scope.MIXED_STRATEGY:
+            record["strategy"] = portfolio_scope.MIXED_STRATEGY
+    return record
 
 
 def _portfolio_context_for_security(portfolio, security_id: int):
@@ -291,6 +302,7 @@ def run_trading_orchestrator(
 
     existing: list[dict[str, Any]] = []
     security_issues: list[dict[str, Any]] = []
+    strategy_parts = portfolio_scope.total_strategy_breakdown(conn, evaluation_as_of)  # the total only; empty for one portfolio
     market_dates: list[str] = []
     for row in position_rows:
         security_id = int(row["security_id"])
@@ -298,7 +310,7 @@ def run_trading_orchestrator(
         per_security_portfolio = _portfolio_context_for_security(portfolio, security_id)
         decision = decide(snapshot, strategy_config, per_security_portfolio)
         priority = PRIORITY[decision.action]
-        record = _security_record(snapshot, decision, priority)
+        record = _with_portfolio_strategies(_security_record(snapshot, decision, priority), strategy_parts.get(security_id))
         existing.append(record)
         if snapshot.market_data_as_of:
             market_dates.append(snapshot.market_data_as_of)
@@ -317,7 +329,7 @@ def run_trading_orchestrator(
         snapshot = build_analysis_snapshot(security_id, as_of=as_of, connection=conn, table_exists_cache=table_exists_cache)
         entry_portfolio = _portfolio_context_for_security(portfolio, security_id)
         decision = decide(snapshot, strategy_config, entry_portfolio)
-        entry_results.append(_security_record(snapshot, decision, PRIORITY[decision.action]))
+        entry_results.append(_with_portfolio_strategies(_security_record(snapshot, decision, PRIORITY[decision.action]), strategy_parts.get(security_id)))
 
     promotion_results: list[dict[str, Any]] = []
     for promotion in evaluate_swing_candidates(conn, as_of=as_of, table_exists_cache=table_exists_cache):

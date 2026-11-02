@@ -24,6 +24,9 @@ finite row, a referenced row that would have to change in place) is reported as 
 
 Side effect worth knowing (documented, not hidden): a not held security with ``swing`` becomes an entry candidate of the planner (still simulation
 only, no order, no campaign).
+
+With per-portfolio strategies (``portfolio_scope``) the strategy is that of ONE portfolio (``portfolio_id``; none = the default portfolio "Main"):
+"held" and "open campaign" are checked in that portfolio, and the same security may have another strategy in another portfolio.
 """
 
 from __future__ import annotations
@@ -32,6 +35,8 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Any, Iterator, Optional
+
+import portfolio_scope
 
 OPERATION = "set_security_strategy"
 STRATEGIES = ("swing", "long_term")  # the values that exist and may be set; None removes the assignment
@@ -137,8 +142,23 @@ def _decide(conn: sqlite3.Connection, security_id: int, wanted: Optional[str], t
     return None, current, current_strategy
 
 
-def set_security_strategy(conn: sqlite3.Connection, security_id: Any, strategy: Any, *, today: Optional[str] = None) -> dict[str, Any]:
-    """Set (``swing`` / ``long_term``) or remove (``None``) the strategy of one security that is not held.  Never raises for bad input."""
+def set_security_strategy(conn: sqlite3.Connection, security_id: Any, strategy: Any, *, today: Optional[str] = None, portfolio_id: Any = None) -> dict[str, Any]:
+    """Set (``swing`` / ``long_term``) or remove (``None``) the strategy of one security that is not held (in the portfolio ``portfolio_id``; none =
+    the default portfolio).  Never raises for bad input."""
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+        owner = portfolio_scope.strategy_owner(conn, portfolio_scope.parse_portfolio_id(portfolio_id))
+        with portfolio_scope.scoped(conn, owner):
+            result = _set_security_strategy(conn, security_id, strategy, today=today, owner=owner)
+        if owner is not None:
+            result["portfolio"] = {"id": owner, "name": portfolio_scope.label(conn, owner)}
+        return result
+    except Exception as exc:  # noqa: BLE001 - every failure is reported
+        return _error(exc)
+
+
+def _set_security_strategy(conn: sqlite3.Connection, security_id: Any, strategy: Any, *, today: Optional[str], owner: Optional[int]) -> dict[str, Any]:
     try:
         if isinstance(security_id, bool) or not isinstance(security_id, (int, str)) or not str(security_id).strip().lstrip("-").isdigit():
             return _result(INVALID_IDENTIFIER)
@@ -161,7 +181,7 @@ def set_security_strategy(conn: sqlite3.Connection, security_id: Any, strategy: 
                 if blocked is not None:
                     return blocked
                 info = _security(conn, sid)
-                _write(conn, sid, active, wanted, day)
+                _write(conn, sid, active, wanted, day, owner)
         except HistoryUnclear:
             return _result(ASSIGNMENT_HISTORY_UNCLEAR, security_id=sid)  # the transaction was rolled back
         return _result(STRATEGY_SET if wanted else STRATEGY_REMOVED, changed=True, strategy=wanted, previous_strategy=previous, effective_from=day if wanted else None, **info)
@@ -173,18 +193,20 @@ class HistoryUnclear(Exception):
     """The assignment cannot be changed without rewriting history."""
 
 
-def _write(conn: sqlite3.Connection, security_id: int, active: Optional[tuple], wanted: Optional[str], today: str) -> None:
+def _write(conn: sqlite3.Connection, security_id: int, active: Optional[tuple], wanted: Optional[str], today: str, owner: Optional[int] = None) -> None:
+    # the reads go through the portfolio context of the connection; the writes name the main table (a TEMP view of the context is read-only)
     yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     if active is not None and active[2] == today:  # started today: correct in place (or delete), unless a campaign refers to it
         if conn.execute("SELECT 1 FROM swing_campaign WHERE strategy_assignment_id = ? LIMIT 1", (active[0],)).fetchone() is not None:
             raise HistoryUnclear("the assignment of today is referenced by a campaign")
         if wanted is None:
-            conn.execute("DELETE FROM strategy_assignment WHERE id = ?", (active[0],))
+            conn.execute("DELETE FROM main.strategy_assignment WHERE id = ?", (active[0],))
         else:
-            conn.execute("UPDATE strategy_assignment SET strategy_type = ?, source = ?, rationale = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (wanted, SOURCE, RATIONALE, active[0]))
+            conn.execute("UPDATE main.strategy_assignment SET strategy_type = ?, source = ?, rationale = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (wanted, SOURCE, RATIONALE, active[0]))
         return
     if active is not None:  # keep the history: close it yesterday, the new one starts today
-        conn.execute("UPDATE strategy_assignment SET effective_to = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (yesterday, active[0]))
+        conn.execute("UPDATE main.strategy_assignment SET effective_to = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (yesterday, active[0]))
     if wanted is not None:
-        conn.execute("INSERT INTO strategy_assignment (security_id, strategy_type, effective_from, effective_to, source, rationale) VALUES (?, ?, ?, NULL, ?, ?)",
-                     (security_id, wanted, today, SOURCE, RATIONALE))
+        column, value, owner_value = (", portfolio_id", ", ?", (owner,)) if owner is not None else ("", "", ())
+        conn.execute(f"INSERT INTO main.strategy_assignment (security_id, strategy_type, effective_from, effective_to, source, rationale{column}) "
+                     f"VALUES (?, ?, ?, NULL, ?, ?{value})", (security_id, wanted, today, SOURCE, RATIONALE, *owner_value))

@@ -13,27 +13,37 @@ Data model (``Migrate-TradingPortfolios.py``):
   average cost is the summed cost basis per share).  Every existing reader of ``positions`` (engine, collectors, MCP tools) keeps working unchanged.
 * ``portfolio_capital_state.portfolio_id`` (``Migrate-TradingPortfolioCash.py``): every recorded cash state belongs to one portfolio; a new portfolio starts
   with a cash state of 0.  ``capital_state.resolve_capital_state`` follows the same convention (one portfolio, or the sum over all active ones).
+* ``strategy_assignment.portfolio_id`` and ``swing_campaign.portfolio_id`` (``Migrate-TradingPortfolioStrategies.py``): a strategy and a Swing campaign
+  belong to one portfolio, so the same security can be Long-Term in one portfolio and Swing in another.  A campaign event belongs to its campaign.
 
-Security master data, prices, FX rates, fundamentals, news, the watchlist, strategy assignments and Swing campaigns stay global.
+Security master data, prices, FX rates, fundamentals, news and the watchlist stay global.
 
 The convention (:func:`scope`): a read connection is given a portfolio context ``portfolio_id`` -- an id = that portfolio only, ``None`` = the total
 (``Gesamt``: all ACTIVE portfolios consolidated).  It is applied by connection-local TEMP views named ``transactions``, ``positions``,
-``v_active_positions`` and ``v_portfolio_market``; SQLite resolves a TEMP object before the main one, so every existing query of that connection reads
-the scoped rows without being changed.  Writers never use a scoped connection (the TEMP views are read-only).  A database without the migration has no
-``portfolio`` table: :func:`scope` then changes nothing (one implicit portfolio, as before).
+``v_active_positions`` and ``v_portfolio_market`` (and, with per-portfolio strategies, ``strategy_assignment`` and ``swing_campaign``); SQLite resolves a
+TEMP object before the main one, so every existing query of that connection reads the scoped rows without being changed.  The TEMP views are read-only:
+a writer that reads one portfolio through them (:func:`scoped`) writes to ``main.<table>``.  A database without the migration has no ``portfolio`` table:
+:func:`scope` then changes nothing (one implicit portfolio, as before).
+
+The total of strategies and campaigns is not a new strategy or campaign: one security held in several portfolios with different strategies is "mixed"
+(:func:`total_strategy_breakdown`), and the campaigns of several portfolios are never merged into one.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 FEATURE_VERSION_KEY = "portfolio_schema_version"
 FEATURE_VERSION = "1"
 CASH_FEATURE_VERSION_KEY = "portfolio_cash_schema_version"
 CASH_FEATURE_VERSION = "1"
+STRATEGY_FEATURE_VERSION_KEY = "portfolio_strategy_schema_version"
+STRATEGY_FEATURE_VERSION = "1"
+MIXED_STRATEGY = "mixed"  # the total of a security whose portfolios have different strategies (never a stored strategy)
 DEFAULT_PORTFOLIO_ID = 1
 DEFAULT_PORTFOLIO_NAME = "Main"
 TOTAL_LABEL = "Gesamt"
@@ -87,7 +97,7 @@ JOIN main.security s ON s.id = p.security_id
 LEFT JOIN main.market_snapshot ms ON ms.security_id = s.id
 WHERE p.shares > 0"""
 
-_SCOPED_VIEWS = ("v_portfolio_market", "v_active_positions", "positions", "transactions")
+_SCOPED_VIEWS = ("v_portfolio_market", "v_active_positions", "positions", "transactions", "strategy_assignment", "swing_campaign")
 
 
 def available(conn: sqlite3.Connection) -> bool:
@@ -102,6 +112,21 @@ def cash_available(conn: sqlite3.Connection) -> bool:
     marker = conn.execute("SELECT value FROM main.metadata WHERE key = ?", (CASH_FEATURE_VERSION_KEY,)).fetchone()
     return marker is not None and marker[0] == CASH_FEATURE_VERSION
 
+
+def strategies_available(conn: sqlite3.Connection) -> bool:
+    """True when strategy assignments and Swing campaigns are kept per portfolio (``Migrate-TradingPortfolioStrategies.py --write``)."""
+    if not available(conn):
+        return False
+    marker = conn.execute("SELECT value FROM main.metadata WHERE key = ?", (STRATEGY_FEATURE_VERSION_KEY,)).fetchone()
+    return marker is not None and marker[0] == STRATEGY_FEATURE_VERSION
+
+
+def strategy_owner(conn: sqlite3.Connection, portfolio_id: Optional[int]) -> Optional[int]:
+    """The portfolio a writer of a strategy assignment or campaign writes to: ``portfolio_id`` checked (active), ``None`` = the default portfolio.
+    ``None`` when strategies are not kept per portfolio yet (the writer then writes without ``portfolio_id``, as before)."""
+    if not strategies_available(conn):
+        return None
+    return require_portfolio(conn, DEFAULT_PORTFOLIO_ID if portfolio_id is None else portfolio_id, active=True)
 
 def parse_portfolio_id(value: Any) -> Optional[int]:
     """The portfolio context of a request: an id, or ``None`` for the total (``None``, ``""``, ``"all"``, ``"total"``, ``"gesamt"``, ``0``)."""
@@ -172,12 +197,72 @@ def scope(conn: sqlite3.Connection, portfolio_id: Optional[int]) -> Optional[int
         where = "portfolio_id IN (SELECT id FROM main.portfolio WHERE active = 1)"
     else:
         where = f"portfolio_id = {int(portfolio_id)}"
-    _with_writes(conn,
-                 f"CREATE TEMP VIEW transactions AS SELECT * FROM main.transactions WHERE {where}",
-                 f"CREATE TEMP VIEW positions AS {aggregate_positions_sql(where)}",
-                 f"CREATE TEMP VIEW v_active_positions AS {ACTIVE_POSITIONS_VIEW}",
-                 f"CREATE TEMP VIEW v_portfolio_market AS {PORTFOLIO_MARKET_VIEW}")
+    statements = [f"CREATE TEMP VIEW transactions AS SELECT * FROM main.transactions WHERE {where}",
+                  f"CREATE TEMP VIEW positions AS {aggregate_positions_sql(where)}",
+                  f"CREATE TEMP VIEW v_active_positions AS {ACTIVE_POSITIONS_VIEW}",
+                  f"CREATE TEMP VIEW v_portfolio_market AS {PORTFOLIO_MARKET_VIEW}"]
+    if strategies_available(conn):
+        statements += [f"CREATE TEMP VIEW strategy_assignment AS SELECT * FROM main.strategy_assignment WHERE {where}",
+                       f"CREATE TEMP VIEW swing_campaign AS SELECT * FROM main.swing_campaign WHERE {where}"]
+    _with_writes(conn, *statements)
     return portfolio_id
+
+
+@contextmanager
+def scoped(conn: sqlite3.Connection, portfolio_id: Optional[int]) -> Iterator[None]:
+    """For a writer: read one portfolio (or the total) through :func:`scope` for a while, then restore the former context of ``conn``.  The writes in
+    between name ``main.<table>`` (the TEMP views are read-only).  Without per-portfolio strategies nothing changes (one implicit portfolio)."""
+    if not strategies_available(conn):
+        yield
+        return
+    had_scope = conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type = 'view' AND name = 'transactions'").fetchone() is not None
+    previous = current(conn)
+    scope(conn, portfolio_id)
+    try:
+        yield
+    finally:
+        if had_scope:
+            scope(conn, previous)
+        else:
+            unscope(conn)
+
+
+def total_strategy_breakdown(conn: sqlite3.Connection, day: str, security_id: Optional[int] = None) -> dict[int, list[dict[str, Any]]]:
+    """The strategies behind the TOTAL of a security: per active portfolio that holds it or has an active assignment on ``day`` --
+    ``{security_id: [{portfolio_id, portfolio, strategy (None = no assignment), shares, campaign_id}]}``, only for securities with more than one such
+    portfolio.  Empty for a connection scoped to one portfolio and without per-portfolio strategies.  Nothing is merged or chosen here."""
+    if not strategies_available(conn) or current(conn) is not None:
+        return {}
+    only = "" if security_id is None else " AND security_id = :sid"
+    rows = conn.execute(
+        f"""WITH k AS (SELECT portfolio_id, security_id FROM main.portfolio_position WHERE shares > 0{only}
+                       UNION SELECT portfolio_id, security_id FROM main.strategy_assignment
+                             WHERE effective_from <= :day AND (effective_to IS NULL OR effective_to >= :day){only})
+            SELECT k.security_id, k.portfolio_id, p.name,
+                   (SELECT sa.strategy_type FROM main.strategy_assignment sa WHERE sa.portfolio_id = k.portfolio_id AND sa.security_id = k.security_id
+                       AND sa.effective_from <= :day AND (sa.effective_to IS NULL OR sa.effective_to >= :day) ORDER BY sa.effective_from DESC, sa.id DESC LIMIT 1),
+                   COALESCE((SELECT pp.shares FROM main.portfolio_position pp WHERE pp.portfolio_id = k.portfolio_id AND pp.security_id = k.security_id), 0),
+                   (SELECT c.id FROM main.swing_campaign c WHERE c.portfolio_id = k.portfolio_id AND c.security_id = k.security_id AND c.status = 'open')
+              FROM k JOIN main.portfolio p ON p.id = k.portfolio_id AND p.active = 1
+             ORDER BY k.security_id, k.portfolio_id""", {"day": str(day)[:10], "sid": security_id}).fetchall()
+    out: dict[int, list[dict[str, Any]]] = {}
+    for sid, pid, name, strategy, shares, campaign_id in rows:
+        out.setdefault(int(sid), []).append({"portfolio_id": int(pid), "portfolio": name, "strategy": strategy, "shares": float(shares or 0.0),
+                                             "campaign_id": None if campaign_id is None else int(campaign_id)})
+    return {sid: parts for sid, parts in out.items() if len(parts) > 1}
+
+
+def relevant_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The portfolios that decide the total strategy of a security: those holding it; without any holding those with an assignment."""
+    held = [p for p in parts if p["shares"] > 0]
+    return held or parts
+
+
+def total_strategy(parts: list[dict[str, Any]]) -> Optional[str]:
+    """The strategy of the total from :func:`total_strategy_breakdown` parts: the one strategy all deciding portfolios share (``None`` = none has one),
+    or :data:`MIXED_STRATEGY` when they differ (a portfolio without an assignment differs from one with)."""
+    strategies = {p["strategy"] for p in relevant_parts(parts)}
+    return next(iter(strategies)) if len(strategies) == 1 else MIXED_STRATEGY
 
 
 def current(conn: sqlite3.Connection) -> Optional[int]:
@@ -268,6 +353,10 @@ def delete_portfolio(conn: sqlite3.Connection, portfolio_id: int) -> None:
         raise ValueError("Das Standard-Depot kann nicht gelöscht werden (umbenennen oder deaktivieren geht)")
     if conn.execute("SELECT COUNT(*) FROM transactions WHERE portfolio_id = ?", (int(portfolio_id),)).fetchone()[0]:
         raise ValueError("Das Depot hat Transaktionen und kann nicht gelöscht werden (deaktivieren geht)")
+    if strategies_available(conn):
+        if conn.execute("SELECT COUNT(*) FROM main.swing_campaign WHERE portfolio_id = ?", (int(portfolio_id),)).fetchone()[0]:
+            raise ValueError("Das Depot hat Swing-Kampagnen und kann nicht gelöscht werden (deaktivieren geht)")
+        conn.execute("DELETE FROM main.strategy_assignment WHERE portfolio_id = ?", (int(portfolio_id),))
     conn.execute("DELETE FROM portfolio_position WHERE portfolio_id = ?", (int(portfolio_id),))
     if cash_available(conn):
         conn.execute("DELETE FROM portfolio_capital_state WHERE portfolio_id = ?", (int(portfolio_id),))

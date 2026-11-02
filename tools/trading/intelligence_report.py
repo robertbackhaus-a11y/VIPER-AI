@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from discovery_report import ReportError, _atomic_write  # noqa: F401  (ReportError is re-exported)
-from market_intelligence import CATEGORIES, IMPACTS, IMPORTANCES, MACRO_CATEGORIES, SOURCE_TYPES
+from market_intelligence import CATEGORIES, IMPACTS, IMPORTANCES, MACRO_CATEGORIES, SOURCE_TYPES, symbol_regions
 from security_aliases import AliasIndex
 from strategy_config import MarketIntelligenceConfig
 
@@ -192,6 +192,21 @@ def _symbol_matches(event: Mapping[str, Any], wanted: str, wanted_ids: frozenset
         return True
     symbols = [s.upper() for s in event["affected_symbols"]]
     return wanted in symbols or any(s.split(".")[0] == wanted for s in symbols)
+
+
+def for_portfolio(report: Mapping[str, Any], held_keys: Sequence[str] | frozenset[str]) -> dict[str, Any]:
+    """The report as seen from ONE depot: the portfolio fields of every event (``affected_portfolio_symbols``, ``portfolio_region_exposure``) and the
+    ``portfolio_relevant_count`` are those of the depot's open positions ``held_keys`` (report keys: Yahoo symbol, else symbol).  The classification,
+    importance and every other field stay exactly as collected; the report itself is not changed."""
+    held = {str(k).upper() for k in held_keys}
+    held_regions = {region for key in held for region in symbol_regions(key)}
+    events = []
+    for event in report["events"]:
+        events.append({**event, "affected_portfolio_symbols": [s for s in event["affected_portfolio_symbols"] if str(s).upper() in held],
+                       "portfolio_region_exposure": sorted(set(event.get("affected_regions") or ()) & held_regions)
+                       if event.get("portfolio_region_exposure") is not None else event.get("portfolio_region_exposure")})
+    metadata = {**report["metadata"], "portfolio_relevant_count": sum(1 for e in events if e["affected_portfolio_symbols"])}
+    return {**report, "metadata": metadata, "events": events}
 
 
 def query_report(

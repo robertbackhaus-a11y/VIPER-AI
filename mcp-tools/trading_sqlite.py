@@ -794,9 +794,9 @@ class Tools:
     # Swing candidate promotion (fixed safe operations only)
     # ============================================================
 
-    def _evaluate_swing_candidate_sync(self, security_id: int) -> dict:
+    def _evaluate_swing_candidate_sync(self, security_id: int, portfolio_id: int | None = None) -> dict:
         promotion = self._load_runtime_trading_module("swing_promotion")
-        conn = self._readonly_import_connection(self.valves.database_path)
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
         try:
             return promotion.evaluate_swing_promotion(conn, int(security_id)).primitive()
         finally:
@@ -811,7 +811,7 @@ class Tools:
             conn.close()
 
     def _approve_swing_promotion_sync(
-        self, security_id: int, plan_token: str, effective_from: str, approved_by: str
+        self, security_id: int, plan_token: str, effective_from: str, approved_by: str, portfolio_id: int | None = None
     ) -> dict:
         promotion = self._load_runtime_trading_module("swing_promotion")
         conn = self._connect()
@@ -822,18 +822,21 @@ class Tools:
                 plan_token=plan_token,
                 effective_from=effective_from,
                 approved_by=approved_by,
+                portfolio_id=portfolio_id,
             )
         finally:
             conn.close()
 
-    async def evaluate_swing_candidate(self, security_id: int) -> dict:
+    async def evaluate_swing_candidate(self, security_id: int, portfolio_id: int | None = None) -> dict:
         """Read-only promotion evaluation for one generic WATCH security.
 
         This evaluates the fixed promotion rules only.  It cannot assign a
         strategy, create a campaign, recommend a BUY, or execute a trade.
+        portfolio_id: one depot (its strategies and positions); omitted = all active depots.
+        approve_swing_promotion needs the token of an evaluation in its depot.
         """
         try:
-            decision = await asyncio.to_thread(self._evaluate_swing_candidate_sync, security_id)
+            decision = await asyncio.to_thread(self._evaluate_swing_candidate_sync, security_id, portfolio_id)
             return {"ok": True, "operation": "evaluate_swing_candidate", "decision": decision}
         except Exception as exc:
             return {"ok": False, "operation": "evaluate_swing_candidate", "error": "PROMOTION_EVALUATION_FAILED", "message": str(exc)}
@@ -854,13 +857,15 @@ class Tools:
         security_id: int,
         plan_token: str,
         effective_from: str,
+        portfolio_id: int | None = None,
         __user__: dict | None = None,
     ) -> dict:
         """Apply one explicitly approved, still-current PROMOTE plan.
 
         Call only after the user approved the returned token.  The operation
         accepts no strategy, quantity, price, SQL, or campaign parameters.
-        It re-evaluates current state before inserting one `swing` assignment.
+        It re-evaluates current state before inserting one `swing` assignment
+        into the depot portfolio_id (omitted = the default depot; strategies are kept per depot).
         """
         approved_by = str((__user__ or {}).get("id") or "mcp")
         try:
@@ -870,6 +875,7 @@ class Tools:
                 plan_token,
                 effective_from,
                 approved_by,
+                portfolio_id,
             )
             return {"ok": True, "operation": "approve_swing_promotion", **result}
         except Exception as exc:
@@ -982,15 +988,36 @@ class Tools:
             return Path(configured)
         return Path(self.valves.database_path).parent / "market-intelligence"
 
+    def _portfolio_symbols(self, portfolio_id: Any) -> tuple[dict[str, Any], frozenset[str]] | None:
+        """The depot of ``portfolio_id`` and the report keys (Yahoo symbol, else symbol) of its open positions; None for the total."""
+        scope = self._load_runtime_trading_module("portfolio_scope")
+        if scope.parse_portfolio_id(portfolio_id) is None:
+            return None
+        aliases = self._load_runtime_trading_module("security_aliases")
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
+        try:
+            current = scope.current(conn)
+            index = aliases.AliasIndex.from_connection(conn)
+            keys = {index.key_for(int(row[0])) for row in conn.execute("SELECT security_id FROM positions WHERE shares > 0")}
+            return {"id": current, "name": scope.label(conn, current)}, frozenset(str(k).upper() for k in keys if k)
+        finally:
+            conn.close()
+
     def _get_market_intelligence_sync(self, scope: str, category: str | None, importance: str | None, symbol: str | None,
-                                      sector: str | None, limit: int, detail: bool) -> dict:
+                                      sector: str | None, limit: int, detail: bool, portfolio_id: Any = None) -> dict:
         report_module = self._load_runtime_trading_module("intelligence_report")
         directory = self._market_intelligence_report_directory()
         report, reason, problems = report_module.read_latest_report(directory)
         if report is None:
             return report_module.unavailable(reason, directory, problems)
-        return report_module.query_report(report, scope=scope, category=category, importance=importance, symbol=symbol,
-                                          sector=sector, limit=limit, detail=detail)
+        portfolio = self._portfolio_symbols(portfolio_id)
+        if portfolio is not None:
+            report = report_module.for_portfolio(report, portfolio[1])
+        result = report_module.query_report(report, scope=scope, category=category, importance=importance, symbol=symbol,
+                                            sector=sector, limit=limit, detail=detail)
+        if portfolio is not None and isinstance(result, dict):
+            result["portfolio"] = portfolio[0]
+        return result
 
     async def get_market_intelligence(
         self,
@@ -1001,6 +1028,7 @@ class Tools:
         sector: str | None = None,
         limit: int = 20,
         detail: bool = False,
+        portfolio_id: int | None = None,
     ) -> dict:
         """Last finished market-intelligence report: classified macro and company news (read-only: no web, no scan, no DB).
         News is context, not a signal; impact is UNKNOWN unless a primary filing states an adverse fact.
@@ -1013,10 +1041,11 @@ class Tools:
         :param sector: e.g. SEMICONDUCTORS, ENERGY
         :param limit: events (default 20; max 50, detail 25); set only if a specific count is required
         :param detail: true = raw dump of all stored fields and substantially larger output; use only when the user explicitly requests detailed/raw data or the compact result lacks information required to answer the question
+        :param portfolio_id: one depot (id from database_status.portfolios): portfolio symbols and scope PORTFOLIO are its positions; omitted = all active depots
         Returns AVAILABLE (freshness, REPORT_STALE flag) or UNAVAILABLE (NO_MARKET_INTELLIGENCE_REPORT).
         """
         try:
-            return await asyncio.to_thread(self._get_market_intelligence_sync, scope, category, importance, symbol, sector, int(limit), bool(detail))
+            return await asyncio.to_thread(self._get_market_intelligence_sync, scope, category, importance, symbol, sector, int(limit), bool(detail), portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "get_market_intelligence", "error": "MARKET_INTELLIGENCE_READ_FAILED", "message": str(exc)}
 
@@ -1024,14 +1053,15 @@ class Tools:
     # Unified opportunity view (read-only: orchestrator + two report files)
     # ============================================================
 
-    def _get_opportunity_view_sync(self, source: str, status: str, news_status: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False) -> dict:
+    def _get_opportunity_view_sync(self, source: str, status: str, news_status: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False,
+                                   portfolio_id: Any = None) -> dict:
         view_module = self._load_runtime_trading_module("opportunity_view")
         discovery_module = self._load_runtime_trading_module("discovery_report")
         intelligence_module = self._load_runtime_trading_module("intelligence_report")
         engine, engine_error, symbol_map, alias_index = None, None, {}, None
         try:
             orchestrator = self._load_runtime_trading_module("trading_orchestrator")
-            conn = self._readonly_import_connection(self.valves.database_path)
+            conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
             try:
                 engine = orchestrator.run_trading_orchestrator(conn).primitive()
                 symbol_map = view_module.load_symbol_map(conn)
@@ -1042,13 +1072,19 @@ class Tools:
             engine, engine_error = None, f"{type(exc).__name__}: {exc}"
         discovery, discovery_reason, _ = discovery_module.read_latest_report(self._discovery_report_directory())
         intelligence, intelligence_reason, _ = intelligence_module.read_latest_report(self._market_intelligence_report_directory())
+        portfolio = self._portfolio_symbols(portfolio_id)
+        if portfolio is not None and intelligence is not None:
+            intelligence = intelligence_module.for_portfolio(intelligence, portfolio[1])
         view = view_module.build_opportunity_view(
             engine=engine, symbol_map=symbol_map, discovery=discovery, discovery_reason=discovery_reason,
             mi=intelligence, mi_reason=intelligence_reason, engine_error=engine_error, alias_index=alias_index,
         )
         if view["metadata"]["status"] == "UNAVAILABLE":
             return view_module.unavailable({"engine": engine_error, "discovery": discovery_reason, "market_intelligence": intelligence_reason})
-        return view_module.query_view(view, source=source, status=status, news_status=news_status, symbol=symbol, limit=limit, detail=detail)
+        result = view_module.query_view(view, source=source, status=status, news_status=news_status, symbol=symbol, limit=limit, detail=detail)
+        if portfolio is not None and isinstance(result, dict):
+            result["portfolio"] = portfolio[0]
+        return result
 
     async def get_opportunity_view(
         self,
@@ -1058,6 +1094,7 @@ class Tools:
         symbol: str | None = None,
         limit: int = 30,
         detail: bool = False,
+        portfolio_id: int | None = None,
     ) -> dict:
         """Opportunities = engine/planner candidates + last discovery report, each with a news-context status
         (read-only: no web, no scan, no DB write, no order). Joins existing results; news never changes a score, rank, size or decision.
@@ -1069,10 +1106,11 @@ class Tools:
         :param symbol: one or comma-separated, e.g. NVDA,AAPL (also shows held positions)
         :param limit: rows (default 30; max 40, detail 10)
         :param detail: true = all fields incl. macro, positions, methodology
+        :param portfolio_id: one depot (id from database_status.portfolios): its positions, cash, strategies and campaigns; omitted = all active depots consolidated
         Returns rows with entry rank/score, plan status and capital, news status and top event; PARTIAL if a report is missing.
         """
         try:
-            return await asyncio.to_thread(self._get_opportunity_view_sync, source, status, news_status, symbol, int(limit), bool(detail))
+            return await asyncio.to_thread(self._get_opportunity_view_sync, source, status, news_status, symbol, int(limit), bool(detail), False, portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "get_opportunity_view", "error": "OPPORTUNITY_VIEW_FAILED", "message": str(exc)}
 
@@ -1088,13 +1126,14 @@ class Tools:
         except Exception:
             return None
 
-    def _get_watchlist_sync(self, status: str | None, strategy: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False) -> dict:
+    def _get_watchlist_sync(self, status: str | None, strategy: str | None, symbol: str | None, limit: int, detail: bool, table: bool = False,
+                            portfolio_id: Any = None) -> dict:
         view_module = self._load_runtime_trading_module("watchlist_view")
         opportunity = self._load_runtime_trading_module("opportunity_view")
         analytics = self._load_runtime_trading_module("trading_analytics")
         decisions_module = self._load_runtime_trading_module("candidate_decision")
         intelligence_module = self._load_runtime_trading_module("intelligence_report")
-        conn = self._readonly_import_connection(self.valves.database_path)
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
         try:
             rows = view_module.load_rows(conn, date.today().isoformat())
             ranking = self._optional(lambda: analytics.rank_watchlist(conn))
@@ -1117,6 +1156,7 @@ class Tools:
         limit: int = 150,
         detail: bool = False,
         table: bool = False,
+        portfolio_id: int | None = None,
     ) -> dict:
         """Every watchlist entry with security data, strategy, priority, rank, score, data quality, candidate decision, entry status and news status
         (read-only: no web, no scan, no DB write, no order; joins the existing ranking, decision, planner and news results and computes nothing new).
@@ -1127,11 +1167,12 @@ class Tools:
         :param limit: rows (default 150, max 200)
         :param detail: true = complete rows (at most 10), only for diagnosis
         :param table: true = the row shape of the desktop GUI table (ids, ISIN, dates, notes flag); chat and LLM clients leave it false
+        :param portfolio_id: one depot (id from database_status.portfolios): its strategies, holdings and planner; omitted = all active depots ("mixed" where they differ)
         The default answer is compact: a summary (counts by strategy, status, data quality, news) plus a few fields per entry; absent fields have no value.
         Rows are ordered by rank (scored entries first), then priority (higher first), then symbol.
         """
         try:
-            return await asyncio.to_thread(self._get_watchlist_sync, status, strategy, symbol, int(limit), bool(detail), bool(table))
+            return await asyncio.to_thread(self._get_watchlist_sync, status, strategy, symbol, int(limit), bool(detail), bool(table), portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "get_watchlist", "error": "WATCHLIST_VIEW_FAILED", "message": str(exc)}
 
@@ -1278,16 +1319,16 @@ class Tools:
         except Exception as exc:
             return {"ok": False, "operation": "set_security_sector", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
 
-    def _set_security_strategy_sync(self, security_id, strategy) -> dict:
+    def _set_security_strategy_sync(self, security_id, strategy, portfolio_id=None) -> dict:
         admin = self._load_runtime_trading_module("strategy_admin")
         conn = self._connect()
         try:
             conn.execute("PRAGMA busy_timeout=5000;")  # the scheduled collectors write too; wait a few seconds instead of failing at once
-            return admin.set_security_strategy(conn, security_id, strategy)
+            return admin.set_security_strategy(conn, security_id, strategy, portfolio_id=portfolio_id)
         finally:
             conn.close()
 
-    async def set_security_strategy(self, security_id: int, strategy: str | None) -> dict:
+    async def set_security_strategy(self, security_id: int, strategy: str | None, portfolio_id: int | None = None) -> dict:
         """ACTION (writes only strategy_assignment; for the desktop GUI only): set the strategy of ONE security that is not held, or remove it.
 
         strategy is swing, long_term or null (= remove the active assignment). Blocked without any write: a currently held position
@@ -1297,9 +1338,10 @@ class Tools:
 
         :param security_id: the security_id of the Security Master
         :param strategy: swing, long_term or null to remove the strategy
+        :param portfolio_id: the depot whose strategy is set (strategies are kept per depot); omitted = the default depot
         """
         try:
-            return await asyncio.to_thread(self._set_security_strategy_sync, security_id, strategy)
+            return await asyncio.to_thread(self._set_security_strategy_sync, security_id, strategy, portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "set_security_strategy", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:200]}
 

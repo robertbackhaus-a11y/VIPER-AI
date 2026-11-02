@@ -21,7 +21,7 @@ HEADERS = ["Symbol", "Name", "Strategie", "Priorität", "Rang", "Score", "Status
 NUMERIC_COLUMNS = (3, 4, 5)  # priority, rank, score sort by value
 SPIN_MIN, SPIN_MAX = -(2**31), 2**31 - 1  # the range of a Qt number field (32-bit); not a business range: the schema has none
 ALL = "Alle"
-STRATEGY_TEXT = {"swing": "Swing", "long_term": "Long-Term", "tactical": "Taktisch"}
+STRATEGY_TEXT = {"swing": "Swing", "long_term": "Long-Term", "tactical": "Taktisch", "mixed": "Mixed (je Depot verschieden)"}
 NO_STRATEGY = "Ohne Strategie"
 MAX_NOTE_LINES = 6
 

@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 from math import floor
 from typing import Optional
 
 from analysis_contracts import AvailabilityStatus, DataQuality
 from strategy_config import SwingStrategyConfig
+
+try:
+    import portfolio_scope
+except ImportError:  # module can also be imported as tools.trading.swing_lifecycle
+    from tools.trading import portfolio_scope
 
 
 FEATURE_VERSION_KEY = "swing_campaign_schema_version"
@@ -138,9 +144,10 @@ def derive_open_lifecycle(
         return _unavailable_context(
             security_id, "swing campaign lifecycle migration has not been applied"
         )
-    query = """
+    per_portfolio = portfolio_scope.strategies_available(conn)
+    query = f"""
         SELECT id, security_id, status, opened_at, original_quantity,
-               reference_avg_cost, reference_currency
+               reference_avg_cost, reference_currency{", portfolio_id" if per_portfolio else ""}
         FROM swing_campaign
         WHERE security_id = ?
     """
@@ -161,6 +168,20 @@ def derive_open_lifecycle(
         query += " AND status = 'open'"
     query += " ORDER BY opened_at DESC, id DESC"
     campaigns = conn.execute(query, params).fetchall()
+    # The total of several portfolios never merges their campaigns: a campaign
+    # applies only when one portfolio alone holds the security or campaigns it.
+    parts = portfolio_scope.total_strategy_breakdown(
+        conn, (evaluation_as_of or date.today().isoformat())[:10], security_id
+    ).get(security_id) if per_portfolio else None
+    if parts:
+        owners = {p["portfolio_id"]: p["portfolio"] for p in parts if p["shares"] > 0 or p["campaign_id"] is not None}
+        if len(owners) > 1:
+            return _unavailable_context(
+                security_id,
+                "Swing campaigns are kept per portfolio; the total does not merge them ("
+                + ", ".join(owners.values()) + ")",
+            )
+        campaigns = [c for c in campaigns if c["portfolio_id"] in owners]
     if not campaigns:
         return _unavailable_context(security_id, "no open Swing campaign is recorded")
     if len(campaigns) != 1:

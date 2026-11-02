@@ -12,6 +12,8 @@ recommendation and writes nothing.  Missing sources degrade to ``None`` / ``NEWS
 
 from __future__ import annotations
 
+import portfolio_scope
+
 import json
 from typing import Any, Mapping, Optional, Sequence
 
@@ -28,6 +30,16 @@ NOTE_FIELDS = ("entry_reason", "thesis", "target_entry", "notes")  # free-text /
 _TABLE_KEYS = ("security_id", "symbol", "name", "isin", "strategy", "held", "priority", "status", "rank", "score", "quality", "as_of",
                "assessment", "entry_status", "promotion", "news_status", "annotated", "added_at", "sector", "sector_source", "sector_public")  # the desktop GUI's table rows (``table=true``)
 _COMPACT_KEYS = ("symbol", "name", "strategy", "held", "priority", "status", "rank", "score", "quality", "assessment", "entry_status", "news_status")  # chat / LLM rows
+
+
+def _strategy(kinds: list[str], per_portfolio: bool) -> Optional[str]:
+    """The engine's rule: exactly one active assignment, otherwise unknown.  The total of several depots (each with at most one) is their one
+    strategy, or ``mixed`` when they differ."""
+    if len(kinds) == 1:
+        return kinds[0]
+    if per_portfolio and kinds:
+        return kinds[0] if len(set(kinds)) == 1 else portfolio_scope.MIXED_STRATEGY
+    return None
 
 
 def load_rows(conn: Any, today: str) -> list[dict[str, Any]]:
@@ -47,6 +59,7 @@ def load_rows(conn: Any, today: str) -> list[dict[str, Any]]:
         "SELECT security_id, strategy_type FROM strategy_assignment WHERE effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)", (today, today)
     ).fetchall():
         strategies.setdefault(int(sid), []).append(str(kind))
+    per_portfolio = portfolio_scope.strategies_available(conn)
     out = []
     for r in rows:
         kinds = strategies.get(int(r[0]), [])
@@ -54,7 +67,7 @@ def load_rows(conn: Any, today: str) -> list[dict[str, Any]]:
             "security_id": int(r[0]), "status": r[1], "priority": r[2], "added_at": r[3], "updated_at": r[4], "symbol": r[5], "name": r[6] or "", "isin": r[7],
             "wkn": r[8], "exchange": r[9], "currency": r[10], "held": bool(r[11]),
             "entry_reason": r[12], "thesis": r[13], "target_entry": r[14], "notes": r[15],
-            "strategy": kinds[0] if len(kinds) == 1 else None,  # the engine's rule: exactly one active assignment, otherwise unknown
+            "strategy": _strategy(kinds, per_portfolio),
         })
     return out
 

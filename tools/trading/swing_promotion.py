@@ -10,6 +10,8 @@ from datetime import date
 import hashlib
 import json
 import sqlite3
+
+import portfolio_scope
 from typing import Optional
 
 from analysis_contracts import AvailabilityStatus, StrategyType, to_primitive
@@ -240,8 +242,23 @@ def approve_swing_promotion(
     plan_token: str,
     effective_from: str,
     approved_by: str,
+    portfolio_id: Optional[int] = None,
 ) -> dict:
-    """Explicitly turn a still-current PROMOTE plan into one swing assignment."""
+    """Explicitly turn a still-current PROMOTE plan into one swing assignment.
+
+    With per-portfolio strategies the plan is evaluated in, and the assignment written to, the portfolio ``portfolio_id`` (none = the default
+    portfolio); the plan token must come from an evaluation in the same portfolio."""
+    owner = portfolio_scope.strategy_owner(conn, portfolio_scope.parse_portfolio_id(portfolio_id))
+    with portfolio_scope.scoped(conn, owner):
+        result = _approve_swing_promotion(conn, security_id=security_id, plan_token=plan_token, effective_from=effective_from,
+                                          approved_by=approved_by, owner=owner)
+    if owner is not None:
+        result["portfolio"] = {"id": owner, "name": portfolio_scope.label(conn, owner)}
+    return result
+
+
+def _approve_swing_promotion(conn: sqlite3.Connection, *, security_id: int, plan_token: str, effective_from: str, approved_by: str,
+                             owner: Optional[int]) -> dict:
     try:
         effective = date.fromisoformat(effective_from).isoformat()
     except ValueError as exc:
@@ -258,10 +275,11 @@ def approve_swing_promotion(
     details = json.dumps(current.primitive(), sort_keys=True, separators=(",", ":"))
     conn.execute("BEGIN IMMEDIATE")
     try:
+        column, value, owner_value = (", portfolio_id", ", ?", (owner,)) if owner is not None else ("", "", ())
         cursor = conn.execute(
-            """INSERT INTO strategy_assignment(security_id, strategy_type, effective_from, source, rationale)
-               VALUES (?, 'swing', ?, 'candidate_promotion', ?)""",
-            (security_id, effective, "approved Swing candidate promotion"),
+            f"""INSERT INTO main.strategy_assignment(security_id, strategy_type, effective_from, source, rationale{column})
+               VALUES (?, 'swing', ?, 'candidate_promotion', ?{value})""",
+            (security_id, effective, "approved Swing candidate promotion", *owner_value),
         )
         conn.execute(
             """INSERT INTO candidate_promotion(security_id, evaluated_at, status, source, rationale, details_json, approved_at, approved_by)

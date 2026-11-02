@@ -41,6 +41,7 @@ from capital_state import resolve_capital_state
 from fx_resolver import resolve_fx_rate
 from portfolio_context import derive_allocation_guardrails
 from swing_lifecycle import derive_open_lifecycle
+import portfolio_scope
 import trading_analytics
 
 
@@ -356,6 +357,10 @@ def _resolve_strategy_assignment(
 
     The resolver never derives a strategy from security attributes or market
     data. A missing table is distinct from a migrated table with no assignment.
+
+    The total of several portfolios (``portfolio_scope.total_strategy_breakdown``)
+    has a strategy only when the deciding portfolios share it; different ones
+    are reported as mixed (strategy UNKNOWN), never resolved to one of them.
     """
 
     if not _strategy_assignment_table_exists(conn, cache=table_exists_cache):
@@ -367,6 +372,29 @@ def _resolve_strategy_assignment(
                 effective_date,
             ),
         )
+    parts = portfolio_scope.total_strategy_breakdown(conn, effective_date, security_id).get(security_id)
+    if parts:
+        total = portfolio_scope.total_strategy(parts)
+        if total == portfolio_scope.MIXED_STRATEGY:
+            mix = ", ".join(f"{p['portfolio']}={p['strategy'] or 'none'}" for p in portfolio_scope.relevant_parts(parts))
+            return (
+                StrategyType.UNKNOWN,
+                DataQuality(
+                    AvailabilityStatus.AVAILABLE,
+                    (f"mixed strategies across portfolios: {mix}",),
+                    effective_date,
+                ),
+            )
+        if total is None:
+            return (
+                StrategyType.UNKNOWN,
+                DataQuality(
+                    AvailabilityStatus.AVAILABLE,
+                    ("no active strategy assignment; strategy is unknown",),
+                    effective_date,
+                ),
+            )
+        return StrategyType(total), DataQuality(AvailabilityStatus.AVAILABLE, (), effective_date)
     rows = conn.execute(
         """
         SELECT id, strategy_type, effective_from, effective_to
@@ -942,13 +970,30 @@ def build_portfolio_context(
                 evaluation_as_of,
             )
 
+        # The total of a security held in several portfolios with different
+        # strategies: its value counts for each strategy by the shares of the
+        # portfolios (the parts are never merged into one strategy).
+        mixed_shares: dict[int, dict[str, float]] = {}
+        for security_id, parts in portfolio_scope.total_strategy_breakdown(conn, evaluation_as_of).items():
+            held = [p for p in parts if p["shares"] > 0]
+            if portfolio_scope.total_strategy(parts) == portfolio_scope.MIXED_STRATEGY and held:
+                total_shares = sum(p["shares"] for p in held)
+                split: dict[str, float] = {}
+                for part in held:
+                    key = part["strategy"] or StrategyType.UNKNOWN.value
+                    split[key] = split.get(key, 0.0) + part["shares"] / total_shares
+                mixed_shares[security_id] = split
+
+        def _strategy_fractions(exposure) -> dict[str, float]:
+            return mixed_shares.get(exposure.security_id) or {exposure.strategy.value: 1.0}
+
         strategy_valid = all(
             exposure.strategy_quality.status is AvailabilityStatus.AVAILABLE
-            and exposure.strategy is not StrategyType.UNKNOWN
+            and StrategyType.UNKNOWN.value not in _strategy_fractions(exposure)
             for exposure in exposures
         )
         target_scope_complete = all(
-            exposure.strategy in {StrategyType.SWING, StrategyType.LONG_TERM}
+            set(_strategy_fractions(exposure)) <= {StrategyType.SWING.value, StrategyType.LONG_TERM.value}
             for exposure in exposures
         )
         allocation_details: list[str] = []
@@ -964,14 +1009,12 @@ def build_portfolio_context(
         allocation_available = not allocation_details
         if allocation_available:
             swing_market_value: Optional[float] = sum(
-                float(exposure.market_value_eur or 0.0)
+                float(exposure.market_value_eur or 0.0) * _strategy_fractions(exposure).get(StrategyType.SWING.value, 0.0)
                 for exposure in exposures
-                if exposure.strategy is StrategyType.SWING
             )
             long_term_market_value: Optional[float] = sum(
-                float(exposure.market_value_eur or 0.0)
+                float(exposure.market_value_eur or 0.0) * _strategy_fractions(exposure).get(StrategyType.LONG_TERM.value, 0.0)
                 for exposure in exposures
-                if exposure.strategy is StrategyType.LONG_TERM
             )
             swing_weight_pct: Optional[float] = (
                 swing_market_value / float(total_market_value) * 100.0

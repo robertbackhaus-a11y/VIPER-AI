@@ -34,7 +34,7 @@ GUARD_TIP = {
     "NOT_ASSESSED": "Ohne eindeutige Sektor-Gruppe kann der Sector Guard nichts bewerten (er blockiert dann nicht). Direkte Zuordnung: Seite Watchlist, Spalte Sektor.",
 }
 LOOKTHROUGH_TEXT = {"APPLIED": "angewendet", "STALE": "angewendet (veraltet)", "NO_DATA": "keine Daten", "ALLOCATION_INVALID": "Daten ungültig", "NO_ISIN": "keine ISIN"}
-STRATEGY_TEXT = {"swing": "Swing", "long_term": "Long-Term", "tactical": "Taktisch"}
+STRATEGY_TEXT = {"swing": "Swing", "long_term": "Long-Term", "tactical": "Taktisch", "mixed": "Mixed"}
 KIND_SECTOR, KIND_ETF_CATEGORY, KIND_UNASSIGNED = "sector", "etf_category", "unassigned"
 COMPANY_ORIGINS = ("etf_company", "etf_company_isin_map", "etf_company_listing_map")
 COMPANY_VIA = {"etf_company_isin_map": ("ISIN", "über ISIN", "Sektor über die ISIN der Holding in der Sector-Map"),

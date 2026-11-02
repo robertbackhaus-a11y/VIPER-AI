@@ -5,6 +5,9 @@
 
 Mutations are dry-runs unless ``--write`` is supplied. The CLI never creates
 the schema itself: run the deliberate strategy-assignment migration first.
+
+With per-portfolio strategies (``Migrate-TradingPortfolioStrategies.py``) every
+command works on ONE portfolio: ``--portfolio-id`` (default 1 = "Main").
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ from datetime import date
 from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
 from typing import Optional
+
+import portfolio_scope
 
 
 DB_PATH = runtime_paths.default_db_path()
@@ -171,6 +176,7 @@ def set_assignment(
     source: Optional[str] = None,
     rationale: Optional[str] = None,
     write: bool = False,
+    owner: Optional[int] = None,
 ) -> dict:
     start, end = _validate_new_assignment(
         conn,
@@ -192,13 +198,14 @@ def set_assignment(
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        column, value, owner_value = (", portfolio_id", ", ?", (owner,)) if owner is not None else ("", "", ())
         cursor = conn.execute(
-            """
-            INSERT INTO strategy_assignment(
-                security_id, strategy_type, effective_from, effective_to, source, rationale
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            f"""
+            INSERT INTO main.strategy_assignment(
+                security_id, strategy_type, effective_from, effective_to, source, rationale{column}
+            ) VALUES (?, ?, ?, ?, ?, ?{value})
             """,
-            (security_id, strategy, start, end, source, rationale),
+            (security_id, strategy, start, end, source, rationale, *owner_value),
         )
         row = conn.execute(
             """
@@ -253,7 +260,7 @@ def close_assignment(
     try:
         conn.execute(
             """
-            UPDATE strategy_assignment
+            UPDATE main.strategy_assignment
             SET effective_to = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -370,6 +377,8 @@ def _parse_args() -> argparse.Namespace:
 
     validate_parser = subparsers.add_parser("validate", help="validate assignment integrity")
     validate_parser.add_argument("--db-path", "--db", dest="command_db_path", type=Path, help=argparse.SUPPRESS)
+    for command in (list_parser, set_parser, close_parser, validate_parser):
+        command.add_argument("--portfolio-id", type=int, default=None, help="the depot (default 1 = Main; strategies are kept per depot)")
     return parser.parse_args()
 
 
@@ -380,19 +389,23 @@ def main() -> int:
     conn: Optional[sqlite3.Connection] = None
     try:
         conn = _connect(db_path, write=write)
-        if args.command == "list":
-            _print(list_assignments(conn, security_id=args.security_id, strategy=args.strategy, active_only=args.active_only))
-            return 0
-        if args.command == "set":
-            _print(set_assignment(conn, security_id=args.security_id, strategy=args.strategy, effective_from=args.effective_from, effective_to=args.effective_to, source=args.source, rationale=args.rationale, write=write))
-            return 0
-        if args.command == "close":
-            _print(close_assignment(conn, security_id=args.security_id, effective_to=args.effective_to, write=write))
-            return 0
-        errors = validate_assignments(conn)
-        _print({"ok": not errors, "errors": errors})
-        return 0 if not errors else 1
-    except (AssignmentSchemaError, AssignmentValidationError, FileNotFoundError) as exc:
+        owner = portfolio_scope.strategy_owner(conn, args.portfolio_id)
+        if owner is None and args.portfolio_id is not None:
+            raise AssignmentValidationError("strategies are not kept per depot yet; apply Migrate-TradingPortfolioStrategies.py --write before using --portfolio-id")
+        with portfolio_scope.scoped(conn, owner):  # reads see this depot only; writes name main.strategy_assignment
+            if args.command == "list":
+                _print(list_assignments(conn, security_id=args.security_id, strategy=args.strategy, active_only=args.active_only))
+                return 0
+            if args.command == "set":
+                _print(set_assignment(conn, security_id=args.security_id, strategy=args.strategy, effective_from=args.effective_from, effective_to=args.effective_to, source=args.source, rationale=args.rationale, write=write, owner=owner))
+                return 0
+            if args.command == "close":
+                _print(close_assignment(conn, security_id=args.security_id, effective_to=args.effective_to, write=write))
+                return 0
+            errors = validate_assignments(conn)
+            _print({"ok": not errors, "errors": errors})
+            return 0 if not errors else 1
+    except (AssignmentSchemaError, AssignmentValidationError, ValueError, FileNotFoundError) as exc:
         _print({"ok": False, "error": str(exc)})
         return 2
     finally:

@@ -216,6 +216,18 @@ def _risk_cells(risk: Any) -> list[str]:
     return [format_reason_code(s.get("status")), sector, corr, cluster, members]
 
 
+_STRATEGY_LABEL = {"swing": "Swing", "long_term": "Long-Term", "tactical": "Taktisch", "unknown": "unbekannt", "mixed": "Mixed", None: "keine"}
+
+
+def _strategy_cell(record: dict) -> str:
+    """The strategy of a planner row; in the total of several depots their strategies side by side (``Mixed`` when they differ, never one chosen)."""
+    parts = [p for p in _l(record.get("strategy_by_portfolio")) if isinstance(p, dict)]
+    if not parts:
+        return _text(record.get("strategy"))
+    each = ", ".join(f"{p.get('portfolio')}: {_STRATEGY_LABEL.get(p.get('strategy'), p.get('strategy'))}" for p in parts)
+    return f"{_STRATEGY_LABEL.get(record.get('strategy'), _text(record.get('strategy')))} ({each})"
+
+
 def build_planner(envelope: Any, refreshed: Optional[datetime] = None) -> PlannerVM:
     vm = PlannerVM()
     result, error = unwrap(envelope)
@@ -243,7 +255,7 @@ def build_planner(envelope: Any, refreshed: Optional[datetime] = None) -> Planne
         pa = _d(plan_actions.get((record.get("security_id"), action)))
         block = pa.get("plan_block_reason")
         rows.append([
-            _text(record.get("symbol")), _text(record.get("strategy")), _text(action), fmt_qty(record.get("position_quantity")), fmt_qty(decision.get("action_quantity")),
+            _text(record.get("symbol")), _strategy_cell(record), _text(action), fmt_qty(record.get("position_quantity")), fmt_qty(decision.get("action_quantity")),
             _text(record.get("priority")), format_reason_codes(_l(decision.get("reasons")), action=action), format_reason_code(block) if block else "",
             *(_risk_cells(pa.get("risk"))[1:3] if pa.get("risk") else [DASH, DASH]),
         ])

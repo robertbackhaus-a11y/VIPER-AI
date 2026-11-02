@@ -66,7 +66,10 @@ the browser session). Every reading endpoint computes in this context: Gesamt ad
 one depot shows only its own data. Watchlist, market data, fundamentals, news and master data are global. An import goes into the target depot chosen on the Import
 page (`portfolio_id`); an Intelligence analysis stores its depot context. Without the migration `viper-ai run Migrate-TradingPortfolios.py --write` there is only the
 existing depot and no switcher. Cash is per depot too (Gesamt = the sum of the active depots); without
-`viper-ai run Migrate-TradingPortfolioCash.py --write` it stays one global value that every depot shows.
+`viper-ai run Migrate-TradingPortfolioCash.py --write` it stays one global value that every depot shows. After
+`viper-ai run Migrate-TradingPortfolioStrategies.py --write` strategies and Swing campaigns are per depot as well: planner, Intelligence and Watchlist work with the
+chosen depot; in Gesamt a security with different strategies shows "Mixed" with the split per depot, and campaigns are never merged. A strategy set on the
+Watchlist in Gesamt applies to the default depot Main.
 
 ## 4. Calculation basis
 

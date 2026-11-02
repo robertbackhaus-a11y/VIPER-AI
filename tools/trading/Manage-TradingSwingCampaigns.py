@@ -6,6 +6,10 @@
 All mutations are dry-runs unless ``--write`` is passed.  This CLI records
 manual lifecycle facts; it does not place orders, infer historic campaigns, or
 turn analytical signals into executions.
+
+With per-portfolio campaigns (``Migrate-TradingPortfolioStrategies.py``) every
+command works on ONE portfolio: ``--portfolio-id`` (default 1 = "Main"); a
+campaign of another portfolio is not found.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ from datetime import date, datetime
 from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
 from typing import Optional
+
+import portfolio_scope
 
 from swing_lifecycle import (
     CAMPAIGN_STATUSES,
@@ -206,6 +212,7 @@ def open_campaign(
     source: str,
     rationale: Optional[str] = None,
     write: bool = False,
+    owner: Optional[int] = None,
 ) -> dict:
     """Create one explicit campaign and its baseline event atomically."""
 
@@ -249,12 +256,13 @@ def open_campaign(
         return {"dry_run": True, "would_insert": payload}
     conn.execute("BEGIN IMMEDIATE")
     try:
+        column, value, owner_value = (", portfolio_id", ", ?", (owner,)) if owner is not None else ("", "", ())
         cursor = conn.execute(
-            """
-            INSERT INTO swing_campaign(
+            f"""
+            INSERT INTO main.swing_campaign(
                 security_id, strategy_assignment_id, opened_at, original_quantity,
-                reference_avg_cost, reference_currency, status, source, rationale
-            ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                reference_avg_cost, reference_currency, status, source, rationale{column}
+            ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?{value})
             """,
             (
                 security_id,
@@ -265,6 +273,7 @@ def open_campaign(
                 currency,
                 event_source,
                 rationale,
+                *owner_value,
             ),
         )
         campaign_id = int(cursor.lastrowid)
@@ -510,7 +519,7 @@ def close_campaign(
                 "SELECT * FROM swing_campaign_event WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()
         conn.execute(
-            """UPDATE swing_campaign
+            """UPDATE main.swing_campaign
                SET status = 'closed', closed_at = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
             (closed, campaign_id),
@@ -635,6 +644,8 @@ def validate_campaigns(conn: sqlite3.Connection) -> list[str]:
         FROM swing_campaign_event event
         LEFT JOIN swing_campaign campaign ON campaign.id = event.campaign_id
         LEFT JOIN transactions transaction_row ON transaction_row.id = event.transaction_id
+        -- the events of this depot's campaigns (the context of the connection) and events without any campaign
+        WHERE campaign.id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM main.swing_campaign c WHERE c.id = event.campaign_id)
         ORDER BY event.id
         """
     ).fetchall()
@@ -761,6 +772,8 @@ def _parse_args() -> argparse.Namespace:
 
     validate_parser = subparsers.add_parser("validate", help="validate campaign lifecycle integrity")
     validate_parser.add_argument("--db-path", "--db", dest="command_db_path", type=Path, help=argparse.SUPPRESS)
+    for command in (list_parser, open_parser, event_parser, close_parser, validate_parser):
+        command.add_argument("--portfolio-id", type=int, default=None, help="the depot (default 1 = Main; campaigns are kept per depot)")
     return parser.parse_args()
 
 
@@ -770,22 +783,26 @@ def main() -> int:
     conn: Optional[sqlite3.Connection] = None
     try:
         conn = _connect(getattr(args, "command_db_path", None) or args.db_path, write=write)
-        if args.command == "list":
-            _print(list_campaigns(conn, security_id=args.security_id, status=args.status))
-            return 0
-        if args.command == "open":
-            _print(open_campaign(conn, security_id=args.security_id, opened_at=args.opened_at, original_quantity=args.original_quantity, reference_avg_cost=args.reference_avg_cost, reference_currency=args.reference_currency, source=args.source, rationale=args.rationale, write=write))
-            return 0
-        if args.command == "event":
-            _print(add_event(conn, campaign_id=args.campaign_id, event_type=args.event_type, event_at=args.event_at, quantity=args.quantity, price=args.price, currency=args.currency, transaction_id=args.transaction_id, source=args.source, external_event_id=args.external_event_id, notes=args.notes, write=write))
-            return 0
-        if args.command == "close":
-            _print(close_campaign(conn, campaign_id=args.campaign_id, closed_at=args.closed_at, write=write, record_close_event=args.record_close_event, quantity=args.quantity, price=args.price, currency=args.currency, transaction_id=args.transaction_id, source=args.source, external_event_id=args.external_event_id, notes=args.notes))
-            return 0
-        errors = validate_campaigns(conn)
-        _print({"ok": not errors, "errors": errors})
-        return 0 if not errors else 1
-    except (CampaignSchemaError, CampaignValidationError, FileNotFoundError) as exc:
+        owner = portfolio_scope.strategy_owner(conn, args.portfolio_id)
+        if owner is None and args.portfolio_id is not None:
+            raise CampaignValidationError("campaigns are not kept per depot yet; apply Migrate-TradingPortfolioStrategies.py --write before using --portfolio-id")
+        with portfolio_scope.scoped(conn, owner):  # reads see this depot only (its campaigns, assignments, transactions, position); writes name main.*
+            if args.command == "list":
+                _print(list_campaigns(conn, security_id=args.security_id, status=args.status))
+                return 0
+            if args.command == "open":
+                _print(open_campaign(conn, security_id=args.security_id, opened_at=args.opened_at, original_quantity=args.original_quantity, reference_avg_cost=args.reference_avg_cost, reference_currency=args.reference_currency, source=args.source, rationale=args.rationale, write=write, owner=owner))
+                return 0
+            if args.command == "event":
+                _print(add_event(conn, campaign_id=args.campaign_id, event_type=args.event_type, event_at=args.event_at, quantity=args.quantity, price=args.price, currency=args.currency, transaction_id=args.transaction_id, source=args.source, external_event_id=args.external_event_id, notes=args.notes, write=write))
+                return 0
+            if args.command == "close":
+                _print(close_campaign(conn, campaign_id=args.campaign_id, closed_at=args.closed_at, write=write, record_close_event=args.record_close_event, quantity=args.quantity, price=args.price, currency=args.currency, transaction_id=args.transaction_id, source=args.source, external_event_id=args.external_event_id, notes=args.notes))
+                return 0
+            errors = validate_campaigns(conn)
+            _print({"ok": not errors, "errors": errors})
+            return 0 if not errors else 1
+    except (CampaignSchemaError, CampaignValidationError, ValueError, FileNotFoundError) as exc:
         _print({"ok": False, "error": str(exc)})
         return 2
     finally:

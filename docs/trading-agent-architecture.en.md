@@ -141,6 +141,7 @@ All `Migrate-*` scripts require `metadata.schema_version == "2.0"` and are dry-r
 | `Migrate-TradingCorporateActions.py` | `corporate_action` | `corporate_action_schema_version` |
 | `Migrate-TradingAnalysisCases.py` | `analysis_case`, `analysis_step` (analysis cases of the reasoning workflow, `analysis_store.py`) | `analysis_case_schema_version` |
 | `Migrate-TradingPortfolios.py` | several depots (`portfolio_scope.py`): `portfolio` with default depot 1 "Main", `transactions.portfolio_id` (every existing transaction → depot 1; `external_id` unique per depot), `portfolio_position` per depot and security; the table `positions` becomes a view adding up all depots per security (with one depot exactly the former rows); `analysis_case.portfolio_id` (NULL = total). Dry run by default, `--write` with a backup copy and a before/after comparison in one transaction | `portfolio_schema_version` |
+| `Migrate-TradingPortfolioStrategies.py` | strategies and Swing campaigns per depot: `strategy_assignment.portfolio_id` and `swing_campaign.portfolio_id` (every existing one → depot 1 "Main"). `strategy_assignment` is rebuilt under the same name with the same ids (unique key and no-overlap triggers per depot); one open campaign per depot and security; a campaign needs a Swing assignment of its own depot, a linked transaction must belong to the campaign's depot. Dry run by default, `--write` with a backup copy; before committing it checks every row and the active strategies and open campaigns (Main and total) | `portfolio_strategy_schema_version` |
 | `Migrate-TradingPortfolioCash.py` | cash per depot: `portfolio_capital_state.portfolio_id` (every existing capital state → depot 1 "Main", so Main cash = total cash = the former cash). Needs the two migrations above. Dry run by default, `--write` with a backup copy; before committing it checks every row and the resolved cash (total and Main) at every recorded date | `portfolio_cash_schema_version` |
 
 | Manager | Subcommands | Wraps |
@@ -283,7 +284,7 @@ The MCP server (`server.py`) exposes every public method of the `Tools` class in
 
 ### 3.8 Swing campaign rules (schema-enforced)
 
-- One open campaign per security: `CREATE UNIQUE INDEX idx_swing_campaign_one_open_per_security ON swing_campaign(security_id) WHERE status = 'open'`.
+- One open campaign per security: `CREATE UNIQUE INDEX idx_swing_campaign_one_open_per_security ON swing_campaign(security_id) WHERE status = 'open'`; after `Migrate-TradingPortfolioStrategies.py` per depot and security (`idx_swing_campaign_one_open_per_portfolio_security`), the assignment must then come from the same depot and a linked transaction must belong to the campaign's depot. The total never merges the campaigns of several depots; different strategies of one security show there as `mixed` with `strategy_by_portfolio`.
 - A campaign requires a matching `strategy_assignment` row with `strategy_type = 'swing'` for the same security (enforced by two `BEFORE INSERT`/`BEFORE UPDATE` triggers).
 - A linked `swing_campaign_event.transaction_id` must belong to a transaction for the campaign's own security (enforced by two triggers) and is unique (`idx_swing_campaign_event_transaction`) — this is the idempotency key of the reconciliation below.
 

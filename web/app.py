@@ -290,7 +290,7 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
     async def view_dashboard(refresh: bool = False):
         envelope = await state.orchestrator(refresh)
         db = await state.engine.read("database_status")
-        return as_json(jsonable(vm_portfolio.build_dashboard(envelope, db, datetime.now())))
+        return as_json(jsonable(vm_portfolio.build_dashboard(envelope, db, datetime.now(), cash_global=PORTFOLIO.get() is not None)))
 
     pages.register(app, state)
     reasoning.register(app, state)

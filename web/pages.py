@@ -284,7 +284,8 @@ def register(app: FastAPI, state) -> None:  # noqa: C901 - one flat list of endp
 
     def import_arguments(body: dict) -> dict:
         return vm_import.request_arguments(upload_path(str(body.get("file_id"))), str(body.get("format_text") or "Parqet-Export"), bool(body.get("create_securities")),
-                                           bool(body.get("include_historical")), body.get("strategies") or {}, body.get("aliases") or {}, body.get("removals") or [])
+                                           bool(body.get("include_historical")), body.get("strategies") or {}, body.get("aliases") or {}, body.get("removals") or [],
+                                           body.get("portfolio_id"))
 
     @app.post("/api/import/check")
     async def import_check(request: Request):

@@ -28,7 +28,7 @@ from .deps import portfolio as vm_portfolio
 from .deps import settings as settings_mod
 from . import pages, reasoning
 from .chat import ChatSession
-from .engine import Engine, ToolNotAllowed
+from .engine import PORTFOLIO, Engine, ToolNotAllowed
 from .views import jsonable
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -76,7 +76,7 @@ class State:
         loaded = settings_mod.load_settings(settings_path)
         self.settings, self.warnings = loaded.settings, list(loaded.warnings)
         self.engine = Engine(db_path or self.settings.trading_db_path)
-        self._orchestrator: tuple[float, Any] | None = None
+        self._orchestrator: dict[Any, tuple[float, Any]] = {}  # per portfolio context
         self.task_watches: dict = {}  # scheduled tasks started from the Tasks page, followed until the scheduler reports their end
         self.chat = ChatSession(self)
         self._tasks = None
@@ -90,13 +90,16 @@ class State:
         return self._tasks
 
     async def orchestrator(self, refresh: bool = False) -> Any:
-        if refresh or self._orchestrator is None or time.monotonic() - self._orchestrator[0] > ORCHESTRATOR_TTL_S:
-            self._orchestrator = (time.monotonic(), await self.engine.read("run_trading_orchestrator"))
-        return self._orchestrator[1]
+        """The orchestrator result of the request's portfolio context (cached per context)."""
+        key = PORTFOLIO.get()
+        cached = self._orchestrator.get(key)
+        if refresh or cached is None or time.monotonic() - cached[0] > ORCHESTRATOR_TTL_S:
+            cached = self._orchestrator[key] = (time.monotonic(), await self.engine.read("run_trading_orchestrator"))
+        return cached[1]
 
     def forget(self) -> None:
-        """After a write the cached orchestrator result is stale."""
-        self._orchestrator = None
+        """After a write the cached orchestrator results are stale."""
+        self._orchestrator = {}
 
 
 async def ollama_status(settings) -> dict:
@@ -112,6 +115,20 @@ async def ollama_status(settings) -> dict:
     model = result.reachable and result.has_model(settings.ollama_model)
     error = result.error if not result.reachable else "" if model else f"Modell {settings.ollama_model} nicht vorhanden"
     return {"ok": bool(model), "reachable": result.reachable, "version": result.version, "model": settings.ollama_model, "error": error}
+
+
+PORTFOLIO_HEADER = "X-Viper-Portfolio"
+
+
+def parse_portfolio(value: Optional[str]) -> Optional[int]:
+    """The header value: a portfolio id, or empty / ``all`` for the total."""
+    text = (value or "").strip().lower()
+    if text in ("", "all", "total", "gesamt"):
+        return None
+    number = int(text)
+    if number <= 0:
+        raise ValueError(text)
+    return number
 
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
@@ -141,6 +158,10 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
         port = server[1] if server and len(server) > 1 and server[1] else None
         if not local_write_allowed(request.method, request.headers.get("host"), request.headers.get("origin"), port):
             return JSONResponse({"ok": False, "error": "FOREIGN_ORIGIN"}, status_code=403)
+        try:  # the depot chosen in the header of the page: the portfolio context of every read of this request (none = the total)
+            PORTFOLIO.set(parse_portfolio(request.headers.get(PORTFOLIO_HEADER) or request.query_params.get("portfolio")))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "INVALID_PORTFOLIO"}, status_code=400)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-cache"  # an updated installation is seen at the next page load
         return response
@@ -148,6 +169,10 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
     @app.exception_handler(ToolNotAllowed)
     async def not_allowed(_request: Request, exc: ToolNotAllowed):
         return JSONResponse({"ok": False, "error": "TOOL_NOT_ALLOWED", "tool": str(exc)}, status_code=403)
+
+    @app.exception_handler(ValueError)
+    async def invalid(_request: Request, exc: ValueError):  # e.g. an unknown or deleted portfolio of the header
+        return JSONResponse({"ok": False, "error": "INVALID_REQUEST", "message": str(exc)}, status_code=422)
 
     @app.exception_handler(FileNotFoundError)
     async def missing(_request: Request, exc: FileNotFoundError):
@@ -168,6 +193,57 @@ def create_app(db_path: Optional[str] = None, settings_path: Optional[Path] = No
     @app.get("/api/portfolio/history")
     async def portfolio_history():
         return as_json(await state.engine.history("portfolio_history"))
+
+    # -- portfolios (depots): the header switcher and the management of the settings page ------------------------------------------------
+    def portfolio_list() -> dict:
+        conn = state.engine.connect_readonly(None)
+        try:
+            scope = state.engine.module("portfolio_scope")
+            return {"available": scope.available(conn), "portfolios": scope.list_portfolios(conn), "current": PORTFOLIO.get(),
+                    "total_label": scope.TOTAL_LABEL}
+        finally:
+            conn.close()
+
+    def portfolio_write(operation: str, *args: Any, **kwargs: Any) -> Any:
+        conn = state.engine.connect_write()
+        try:
+            return getattr(state.engine.module("portfolio_scope"), operation)(conn, *args, **kwargs)
+        finally:
+            conn.close()
+
+    @app.get("/api/portfolios")
+    async def portfolios():
+        return as_json(await asyncio.to_thread(portfolio_list))
+
+    @app.post("/api/portfolios")
+    async def portfolio_create(request: Request):
+        body = await _arguments(request)
+        try:
+            created = await asyncio.to_thread(portfolio_write, "create_portfolio", body.get("name"), body.get("description"))
+        except ValueError as exc:
+            return as_json({"ok": False, "message": str(exc)}, 422)
+        state.forget()
+        return as_json({"ok": True, "portfolio": created})
+
+    @app.post("/api/portfolios/{portfolio_id}")
+    async def portfolio_update(portfolio_id: int, request: Request):
+        body = await _arguments(request)
+        try:
+            updated = await asyncio.to_thread(lambda: portfolio_write("update_portfolio", portfolio_id, name=body.get("name"), description=body.get("description"),
+                                                                     active=None if body.get("active") is None else bool(body.get("active"))))
+        except ValueError as exc:
+            return as_json({"ok": False, "message": str(exc)}, 422)
+        state.forget()
+        return as_json({"ok": True, "portfolio": updated})
+
+    @app.post("/api/portfolios/{portfolio_id}/delete")
+    async def portfolio_delete(portfolio_id: int):
+        try:
+            await asyncio.to_thread(portfolio_write, "delete_portfolio", portfolio_id)
+        except ValueError as exc:
+            return as_json({"ok": False, "message": str(exc)}, 422)
+        state.forget()
+        return as_json({"ok": True})
 
     @app.get("/api/transactions")
     async def transactions(security_id: Optional[int] = None, limit: int = 2000):

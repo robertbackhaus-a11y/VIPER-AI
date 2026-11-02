@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 import corporate_actions
 import fx_resolver
+import portfolio_scope
 import sector_overview
 from strategy_config import DataQualityConfig, FXConfig
 from transaction_import import apply_cost_basis
@@ -98,9 +99,11 @@ def holdings(conn: sqlite3.Connection, as_of: Optional[str] = None) -> dict[str,
 
 
 def transactions(conn: sqlite3.Connection, security_id: Optional[int] = None, limit: int = TRANSACTION_LIMIT) -> list[dict[str, Any]]:
-    """The stored transactions, newest first (optionally of one security)."""
-    sql = ("SELECT t.id, t.security_id, s.symbol, s.name, t.transaction_type, t.transaction_date, t.shares, t.price, t.amount, t.fees, t.taxes, t.currency, t.broker "
-           "FROM transactions t LEFT JOIN security s ON s.id = t.security_id")
+    """The stored transactions of the connection's portfolio context, newest first (optionally of one security), with the portfolio of each."""
+    portfolio = (", t.portfolio_id, pf.name AS portfolio_name FROM transactions t LEFT JOIN main.portfolio pf ON pf.id = t.portfolio_id"
+                 if portfolio_scope.available(conn) else " FROM transactions t")
+    sql = ("SELECT t.id, t.security_id, s.symbol, s.name, t.transaction_type, t.transaction_date, t.shares, t.price, t.amount, t.fees, t.taxes, t.currency, t.broker"
+           + portfolio + " LEFT JOIN security s ON s.id = t.security_id")
     params: list[Any] = []
     if security_id is not None:
         sql += " WHERE t.security_id = ?"
@@ -144,7 +147,10 @@ def portfolio_history(conn: sqlite3.Connection, end: Optional[str] = None, *, da
                       fx_config: Optional[FXConfig] = None) -> dict[str, Any]:
     """Daily invested capital (cost basis of the holdings) and EUR market value since the first transaction."""
     dq, fx_cfg = data_quality or DataQualityConfig(), fx_config or FXConfig()
-    rows = conn.execute("SELECT security_id, transaction_type, transaction_date, shares, amount, fees, taxes, currency FROM transactions "
+    # a position is one (portfolio, security): the total of several portfolios replays each portfolio's transactions on its own (the average cost of
+    # one portfolio never mixes with another's), exactly like the stored positions
+    portfolio = "portfolio_id" if portfolio_scope.available(conn) else "0"
+    rows = conn.execute(f"SELECT security_id, {portfolio} AS portfolio_id, transaction_type, transaction_date, shares, amount, fees, taxes, currency FROM transactions "
                         "ORDER BY transaction_date, id").fetchall()
     last_day = date.fromisoformat(str(end)[:10]) if end else date.today()
     if not rows:
@@ -154,7 +160,7 @@ def portfolio_history(conn: sqlite3.Connection, end: Optional[str] = None, *, da
     prices: dict[int, _Prices] = {}
     fx_cache: dict[tuple[str, str], Optional[float]] = {}
     table_cache: dict[str, bool] = {}
-    state: dict[int, list[float]] = {}  # security_id -> [shares, remaining cost basis, invested]
+    state: dict[tuple[int, int], list[float]] = {}  # (portfolio_id, security_id) -> [shares, remaining cost basis, invested]
     non_eur_cash = False
 
     def price_eur(sid: int, day: str) -> Optional[float]:
@@ -184,25 +190,27 @@ def portfolio_history(conn: sqlite3.Connection, end: Optional[str] = None, *, da
             flow, dividends = _cash(r, flow, dividends)
             sid = int(r["security_id"])
             quantity = float(r["shares"] or 0.0) * corporate_actions.cumulative_split_factor(actions[sid], str(r["transaction_date"]), None)
-            s = state.setdefault(sid, [0.0, 0.0, 0.0])
+            s = state.setdefault((int(r["portfolio_id"]), sid), [0.0, 0.0, 0.0])
             s[0], s[1], s[2] = apply_cost_basis(s[0], s[1], s[2], r["transaction_type"], quantity, float(r["amount"] or 0.0), float(r["fees"] or 0.0),
                                                 float(r["taxes"] or 0.0))
             if abs(s[0]) < 1e-9:
                 s[0] = s[1] = 0.0
-        held = {sid: s for sid, s in state.items() if s[0] > 0}
+        held = {key: s for key, s in state.items() if s[0] > 0}
         value: Optional[float] = 0.0
         missing: list[str] = []
-        for sid, s in held.items():
+        for (_, sid), s in held.items():
             p = price_eur(sid, text)
             if p is None:
-                missing.append(str(securities[sid]["symbol"] if sid in securities and securities[sid]["symbol"] else sid))
+                symbol = str(securities[sid]["symbol"] if sid in securities and securities[sid]["symbol"] else sid)
+                if symbol not in missing:
+                    missing.append(symbol)
             elif value is not None:
                 value += s[0] * p
         if missing:
             value = None
         invested = sum(s[1] for s in held.values())
         point = {"date": text, "invested_eur": round(invested, 2), "market_value_eur": None if value is None else round(value, 2),
-                 "unrealized_eur": None if value is None else round(value - invested, 2), "positions": len(held),
+                 "unrealized_eur": None if value is None else round(value - invested, 2), "positions": len({sid for _, sid in held}),
                  "flow_eur": round(flow, 2), "dividends_eur": round(dividends, 2)}
         if missing:
             point["missing"] = missing

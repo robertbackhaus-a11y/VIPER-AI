@@ -4,8 +4,19 @@
 
 export const DASH = "—";
 
+// The depot chosen in the header: the portfolio context of every request of this browser tab (sessionStorage = this web session only).
+// "" = Gesamt (all active depots consolidated). Sent as the header X-Viper-Portfolio; the server applies it to every read.
+const PORTFOLIO_KEY = "viper.portfolio";
+export function portfolioId() {
+  try { return sessionStorage.getItem(PORTFOLIO_KEY) || ""; } catch { return ""; }
+}
+export function setPortfolioId(id) {
+  try { if (id) sessionStorage.setItem(PORTFOLIO_KEY, String(id)); else sessionStorage.removeItem(PORTFOLIO_KEY); } catch { /* storage blocked: Gesamt */ }
+}
+export const portfolioHeaders = (extra = {}) => ({ ...extra, "X-Viper-Portfolio": portfolioId() || "all" });
+
 export async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const response = await fetch(path, { headers: portfolioHeaders({ "Content-Type": "application/json" }), ...options });
   const text = await response.text();
   let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = { ok: false, message: text }; }

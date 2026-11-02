@@ -74,7 +74,8 @@ const caseDuration = (c) => (c.status === "RUNNING" ? (c.interrupted ? DASH : si
 async function overview(target) {
   const [data, securities, events] = await Promise.all([get("/api/intelligence"), get("/api/intelligence/securities"), read("get_market_intelligence", { limit: 12 }).catch(() => null)]);
   const head = el("div", { class: "head" }, el("div", {}, el("h1", {}, "Intelligence"),
-    el("div", { class: "muted small" }, "Investmentthesen der VIPER-Analyse (LangGraph): Zahlen aus der Engine, Abwägung durch das lokale Modell. Ein Vorschlag ist keine Order.")));
+    el("div", { class: "muted small" }, "Investmentthesen der VIPER-Analyse (LangGraph): Zahlen aus der Engine, Abwägung durch das lokale Modell. Ein Vorschlag ist keine Order."),
+    data.portfolio ? el("div", { class: "muted small" }, `Depot-Kontext: ${data.portfolio.name} – Position und Risiko einer neuen Analyse beziehen sich darauf; die Thesen unten sind die dieses Kontexts.`) : ""));
   if (!data.available) {
     target.replaceChildren(head, el("div", { class: "note warning" }, data.message));
     return;
@@ -106,9 +107,9 @@ async function overview(target) {
         el("td", {}, el("button", { onclick: () => start({ security_id: c.security_id, question: c.question, supersedes_id: c.id, trigger: "reevaluation" }) }, "Neu bewerten"))))))) :
       el("p", { class: "muted" }, "Noch keine Analyse. Wertpapier wählen und „Analyse starten“."));
     processesBox.replaceChildren(d.cases.length ? el("div", { class: "table-wrap" }, el("table", {},
-      el("thead", {}, el("tr", {}, ["Nr.", "Wertpapier", "Status", "Auslöser", "Gestartet", "Beendet", "Dauer", "Vorschlag", ""].map((h) => el("th", {}, h)))),
+      el("thead", {}, el("tr", {}, ["Nr.", "Wertpapier", "Depot", "Status", "Auslöser", "Gestartet", "Beendet", "Dauer", "Vorschlag", ""].map((h) => el("th", {}, h)))),
       el("tbody", {}, d.cases.map((c) => el("tr", { class: "click", onclick: () => { location.hash = `#/analysis/${c.id}`; } },
-        el("td", {}, `#${c.id}`), el("td", {}, c.symbol || c.security_id), el("td", {}, statusBadge(c)), el("td", {}, c.trigger === "reevaluation" ? "Neubewertung" : "manuell"),
+        el("td", {}, `#${c.id}`), el("td", {}, c.symbol || c.security_id), el("td", {}, c.portfolio_name || "Gesamt"), el("td", {}, statusBadge(c)), el("td", {}, c.trigger === "reevaluation" ? "Neubewertung" : "manuell"),
         el("td", {}, stamp(c.created_at)), el("td", {}, c.finished_at ? stamp(c.finished_at) : DASH), el("td", {}, caseDuration(c)),
         el("td", {}, actionText(c.action)),
         el("td", {}, c.interrupted || c.status === "FAILED" ? el("button", { onclick: async (e) => { e.stopPropagation(); await post(`/api/intelligence/cases/${c.id}/resume`); refresh(); } }, "Fortsetzen") : "")))))) :
@@ -295,7 +296,7 @@ async function detail(target, id) {
     title.textContent = `Analyse #${c.id} · ${c.symbol || c.security_id}${c.name ? ` · ${c.name}` : ""}`;
     const runtime = live ? ["läuft seit ", since(c.created_at)] : c.interrupted ? "unterbrochen"
       : `${cancelled(c) ? "abgebrochen" : c.status === "FAILED" ? "fehlgeschlagen" : "abgeschlossen"} nach ${duration(ms(c.finished_at) - ms(c.created_at))}`;
-    meta.replaceChildren(el("span", {}, `Modell ${c.model || DASH} · gestartet ${hm(c.created_at)} · `, runtime,
+    meta.replaceChildren(el("span", {}, `Depot ${c.portfolio_name || "Gesamt"} · Modell ${c.model || DASH} · gestartet ${hm(c.created_at)} · `, runtime,
       c.supersedes_id ? [" · Neubewertung von ", el("a", { href: `#/analysis/${c.supersedes_id}` }, `#${c.supersedes_id}`)] : ""),
       el("div", {}, c.question));
     const signature = `${c.status}|${c.interrupted}|${c.cancel_requested}`;

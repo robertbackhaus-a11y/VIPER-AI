@@ -32,6 +32,7 @@ from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+import portfolio_scope
 import security_onboarding
 from corporate_actions import cumulative_split_factor, load_corporate_actions
 
@@ -145,6 +146,9 @@ class ImportOptions:
     include_historical: bool = False  # part of the plan token: a check without historical rows cannot be applied with them (apply_import_plan also takes it as an argument)
     as_of_date: Optional[str] = None  # "today" for assignment lookups (tests); default: current UTC date
     remove_transactions: tuple[int, ...] = ()  # transaction ids of the plan's removed_in_source rows the caller approved for deletion
+    # target portfolio (depot) of the import: duplicates, removed rows and positions are judged within it; None = the default portfolio (build_import_plan
+    # resolves it, so the plan token names the portfolio).  Without the portfolio schema there is one implicit portfolio and it stays None.
+    portfolio_id: Optional[int] = None
 
     @property
     def has_phase_work(self) -> bool:
@@ -345,6 +349,8 @@ _STATE_TABLES: tuple[tuple[str, Optional[str]], ...] = (
     ("security", f"id IN ({_TOUCHED})"),
     ("transactions", f"security_id IN ({_TOUCHED})"),
     ("positions", f"security_id IN ({_TOUCHED})"),
+    ("portfolio_position", f"security_id IN ({_TOUCHED})"),
+    ("portfolio", None),
     ("source_symbols", f"security_id IN ({_TOUCHED})"),
     ("corporate_action", f"security_id IN ({_TOUCHED})"),
     ("strategy_assignment", f"security_id IN ({_TOUCHED})"),
@@ -356,9 +362,28 @@ _STATE_TABLES: tuple[tuple[str, Optional[str]], ...] = (
 _STATE_IGNORED_COLUMNS = frozenset({"created_at", "updated_at", "verified_at"})
 
 
-def _latest_transaction(conn: sqlite3.Connection) -> tuple[int, Optional[int], Optional[str]]:
-    row = conn.execute("SELECT COUNT(*) AS count, MAX(id) AS max_id, MAX(transaction_date) AS latest FROM transactions").fetchone()
+def _latest_transaction(conn: sqlite3.Connection, portfolio_id: Optional[int] = None) -> tuple[int, Optional[int], Optional[str]]:
+    """Count, highest id and latest date of the transactions (of one portfolio when ``portfolio_id`` is given)."""
+    where, params = _portfolio_filter(portfolio_id)
+    row = conn.execute(f"SELECT COUNT(*) AS count, MAX(id) AS max_id, MAX(transaction_date) AS latest FROM transactions WHERE 1 = 1{where}", params).fetchone()
     return int(row[0]), row[1], row[2]
+
+
+def _portfolio_filter(portfolio_id: Optional[int], alias: str = "") -> tuple[str, tuple]:
+    """The SQL condition (`` AND ...``) that limits transactions to the import's portfolio; empty without the portfolio schema (``portfolio_id`` None)."""
+    return (f" AND {alias}portfolio_id = ?", (int(portfolio_id),)) if portfolio_id is not None else ("", ())
+
+
+def target_portfolio(conn: sqlite3.Connection, portfolio_id: Optional[int]) -> Optional[int]:
+    """The portfolio an import writes to: the given (active) one or the default portfolio; ``None`` only for a database without the portfolio schema."""
+    if not portfolio_scope.available(conn):
+        if portfolio_id is not None:
+            raise TransactionImportError("the database has no portfolios yet (Migrate-TradingPortfolios.py --write)")
+        return None
+    try:
+        return portfolio_scope.require_portfolio(conn, portfolio_scope.DEFAULT_PORTFOLIO_ID if portfolio_id is None else portfolio_id, active=True)
+    except ValueError as exc:
+        raise TransactionImportError(str(exc)) from exc
 
 
 def _db_state_token(conn: sqlite3.Connection, security_ids: Iterable[int] = ()) -> tuple[Optional[str], str]:
@@ -373,6 +398,8 @@ def _db_state_token(conn: sqlite3.Connection, security_ids: Iterable[int] = ()) 
     digest = hashlib.sha256(json.dumps({"count": count, "max_id": max_id, "latest": latest}, sort_keys=True).encode("utf-8"))
     for table, condition in _STATE_TABLES:
         columns = [r[1] for r in conn.execute(f"PRAGMA table_info({table})") if r[1] not in _STATE_IGNORED_COLUMNS]
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ?", (table,)).fetchone() is not None:
+            continue  # positions is a view over portfolio_position once there are portfolios: its rows are hashed through that table
         if not columns:  # the table does not exist in this database (older schema): it cannot influence the import
             digest.update(f"|{table}:absent".encode("utf-8"))
             continue
@@ -402,11 +429,12 @@ def _unique_security(
     return None, None, None
 
 
-def _existing_for_security(conn: sqlite3.Connection, security_id: int) -> list[sqlite3.Row]:
+def _existing_for_security(conn: sqlite3.Connection, security_id: int, portfolio_id: Optional[int] = None) -> list[sqlite3.Row]:
+    where, params = _portfolio_filter(portfolio_id)
     return conn.execute(
-        """SELECT id, security_id, transaction_type, transaction_date, shares, price,
+        f"""SELECT id, security_id, transaction_type, transaction_date, shares, price,
                   amount, fees, taxes, currency, broker, external_id
-             FROM transactions WHERE security_id = ?""", (security_id,)
+             FROM transactions WHERE security_id = ?{where}""", (security_id, *params)
     ).fetchall()
 
 
@@ -434,8 +462,13 @@ def _rebuild_position(
     imported_records: Iterable[NormalizedImportRecord] = (),
     *,
     as_of: Optional[str] = None,
+    portfolio_id: Optional[int] = None,
 ) -> None:
     """Recompute one position using the DB's average-cost transaction model.
+
+    With the portfolio schema a position is one ``(portfolio, security)``: only the transactions of ``portfolio_id`` (default: the default portfolio)
+    are replayed and the row of ``portfolio_position`` is written; the ``positions`` view adds the portfolios up.  ``imported_records`` must belong to
+    that portfolio.
 
     BUY and TRANSFERIN increase cost basis by amount + fees + taxes.  SELL and
     TRANSFEROUT reduce it at the current average cost. ``invested_amount`` is
@@ -459,8 +492,13 @@ def _rebuild_position(
     today, matching this function's existing "rebuild the current position"
     behavior for every pre-existing caller.
     """
-    rows = conn.execute("""SELECT transaction_type, transaction_date, shares, price, amount, fees, taxes, currency
-                           FROM transactions WHERE security_id = ? ORDER BY transaction_date, id""", (security_id,)).fetchall()
+    if portfolio_scope.available(conn):
+        portfolio_id = portfolio_scope.DEFAULT_PORTFOLIO_ID if portfolio_id is None else int(portfolio_id)
+    else:
+        portfolio_id = None
+    where, params = _portfolio_filter(portfolio_id)
+    rows = conn.execute(f"""SELECT transaction_type, transaction_date, shares, price, amount, fees, taxes, currency
+                           FROM transactions WHERE security_id = ?{where} ORDER BY transaction_date, id""", (security_id, *params)).fetchall()
     actions = load_corporate_actions(conn, security_id)
     shares = 0.0
     remaining = 0.0
@@ -488,7 +526,10 @@ def _rebuild_position(
     average = remaining / shares if shares > 0 else None
     first = rows[0]["transaction_date"] if rows else None
     last = rows[-1]["transaction_date"] if rows else None
-    prior = conn.execute("SELECT realized_gain FROM positions WHERE security_id = ?", (security_id,)).fetchone()
+    if portfolio_id is None:
+        prior = conn.execute("SELECT realized_gain FROM positions WHERE security_id = ?", (security_id,)).fetchone()
+    else:
+        prior = conn.execute("SELECT realized_gain FROM portfolio_position WHERE portfolio_id = ? AND security_id = ?", (portfolio_id, security_id)).fetchone()
     prior_realized = float(prior[0] or 0.0) if prior is not None else 0.0
     imported_realized = sum(
         float(record.realized_gain or 0.0)
@@ -496,6 +537,19 @@ def _rebuild_position(
         if record.security_id == security_id
     )
     realized = prior_realized + imported_realized
+    if portfolio_id is not None:
+        conn.execute(
+            """INSERT INTO portfolio_position(portfolio_id, security_id, shares, avg_cost, remaining_cost_basis, currency, invested_amount,
+                                              realized_gain, first_transaction_at, last_transaction_at, transaction_count, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(portfolio_id, security_id) DO UPDATE SET
+                  shares=excluded.shares, avg_cost=excluded.avg_cost, remaining_cost_basis=excluded.remaining_cost_basis,
+                  currency=excluded.currency, invested_amount=excluded.invested_amount, realized_gain=excluded.realized_gain,
+                  first_transaction_at=excluded.first_transaction_at, last_transaction_at=excluded.last_transaction_at,
+                  transaction_count=excluded.transaction_count, updated_at=CURRENT_TIMESTAMP""",
+            (portfolio_id, security_id, shares, average, remaining, currency, invested, realized, first, last, len(rows)),
+        )
+        return
     conn.execute(
         """INSERT INTO positions(security_id, shares, avg_cost, remaining_cost_basis, currency, invested_amount,
                                   realized_gain, first_transaction_at, last_transaction_at, transaction_count, updated_at)
@@ -516,8 +570,16 @@ def rebuild_position(conn: sqlite3.Connection, security_id: int, *, as_of: Optio
     by ``Manage-TradingCorporateActions.py`` after a corporate action is
     added, so a split-affected position is rebuilt through the exact same
     split-aware logic rather than a duplicated one-off calculation.
+
+    With the portfolio schema every portfolio that has transactions or a position of the security is rebuilt.
     """
-    _rebuild_position(conn, security_id, (), as_of=as_of)
+    if not portfolio_scope.available(conn):
+        _rebuild_position(conn, security_id, (), as_of=as_of)
+        return
+    portfolios = {int(r[0]) for r in conn.execute("SELECT portfolio_id FROM transactions WHERE security_id = ? UNION "
+                                                   "SELECT portfolio_id FROM portfolio_position WHERE security_id = ?", (security_id, security_id))}
+    for portfolio_id in sorted(portfolios or {portfolio_scope.DEFAULT_PORTFOLIO_ID}):
+        _rebuild_position(conn, security_id, (), as_of=as_of, portfolio_id=portfolio_id)
 
 
 def _lifecycle_api():
@@ -808,11 +870,13 @@ def _write_backup(conn: sqlite3.Connection, tag: str, backup_path: str | Path | 
 
 
 def _duplicate_audit(conn: sqlite3.Connection) -> dict[str, list[Any]]:
-    economic: dict[str, list[int]] = {}
-    for row in conn.execute("SELECT id, security_id, transaction_type, transaction_date, shares, price, amount, fees, taxes, currency, broker FROM transactions"):
+    """Exact economic duplicates and repeated external ids WITHIN one portfolio (the same purchase may exist in two portfolios)."""
+    portfolio = "portfolio_id" if portfolio_scope.available(conn) else "1"
+    economic: dict[tuple[Any, str], list[int]] = {}
+    for row in conn.execute(f"SELECT id, security_id, transaction_type, transaction_date, shares, price, amount, fees, taxes, currency, broker, {portfolio} AS portfolio FROM transactions"):
         key = economic_fingerprint(security_id=int(row["security_id"]), transaction_type=row["transaction_type"], transaction_date=row["transaction_date"], shares=float(row["shares"] or 0), price=float(row["price"] or 0), amount=float(row["amount"] or 0), fees=float(row["fees"] or 0), taxes=float(row["taxes"] or 0), currency=row["currency"] or "", broker=row["broker"] or "")
-        economic.setdefault(key, []).append(int(row["id"]))
-    external = conn.execute("SELECT external_id, GROUP_CONCAT(id) FROM transactions WHERE external_id IS NOT NULL GROUP BY external_id HAVING COUNT(*) > 1").fetchall()
+        economic.setdefault((row["portfolio"], key), []).append(int(row["id"]))
+    external = conn.execute(f"SELECT external_id, GROUP_CONCAT(id) FROM transactions WHERE external_id IS NOT NULL GROUP BY {portfolio}, external_id HAVING COUNT(*) > 1").fetchall()
     return {"exact_economic_duplicates": [ids for ids in economic.values() if len(ids) > 1], "duplicate_external_ids": [tuple(row) for row in external]}
 
 # ---------------------------------------------------------------------------------------------------------------------------------
@@ -1079,13 +1143,14 @@ def _record_from_row(
 
     digest = fingerprint(security_id)
     external_id = adapter.external_prefix + (row.external_id or digest)
-    existing = cache.setdefault(security_id, _existing_for_security(conn, security_id))
+    existing = cache.setdefault(security_id, _existing_for_security(conn, security_id, options.portfolio_id))
     exact = [item for item in existing if economic_fingerprint(
         security_id=int(item["security_id"]), transaction_type=item["transaction_type"], transaction_date=item["transaction_date"],
         shares=float(item["shares"] or 0), price=float(item["price"] or 0), amount=float(item["amount"] or 0),
         fees=float(item["fees"] or 0), taxes=float(item["taxes"] or 0), currency=item["currency"] or "", broker=item["broker"] or "",
     ) == digest]
-    external_matches = conn.execute("SELECT id FROM transactions WHERE external_id = ?", (external_id,)).fetchall()  # the unique index is global
+    where, params = _portfolio_filter(options.portfolio_id)
+    external_matches = conn.execute(f"SELECT id FROM transactions WHERE external_id = ?{where}", (external_id, *params)).fetchall()  # the unique index is per portfolio
     same_event = [item for item in existing if item["transaction_type"] == row.transaction_type and item["transaction_date"] == row.transaction_date]
     if exact:
         classification, reason = CLASS_DUPLICATE, f"economic match with transaction_id {exact[0]['id']}"
@@ -1214,7 +1279,8 @@ def _masterdata_changes(conn: sqlite3.Connection, records: Iterable[NormalizedIm
     return updates, conflicts
 
 
-def _removed_in_source(conn: sqlite3.Connection, adapter: ImportAdapter, records: Iterable[NormalizedImportRecord]) -> list[dict[str, Any]]:
+def _removed_in_source(conn: sqlite3.Connection, adapter: ImportAdapter, records: Iterable[NormalizedImportRecord],
+                       portfolio_id: Optional[int] = None) -> list[dict[str, Any]]:
     """Transactions this source imported earlier that its current full export no longer contains.
 
     A provider that lists the whole portfolio (``full_export``) drops a row it deleted or replaced, e.g. a placeholder transfer superseded by the real
@@ -1230,12 +1296,13 @@ def _removed_in_source(conn: sqlite3.Connection, adapter: ImportAdapter, records
         return []
     # a transaction a campaign event links to cannot be deleted (ON DELETE RESTRICT); the count tells the caller why
     linked = "(SELECT COUNT(*) FROM swing_campaign_event e WHERE e.transaction_id = t.id)" if _lifecycle_available(conn) else "0"
+    where, params = _portfolio_filter(portfolio_id, "t.")  # the export of one portfolio says nothing about the rows of another
     rows = conn.execute(
         f"""SELECT t.id, t.security_id, s.symbol, s.name, t.transaction_type, t.transaction_date, t.shares, t.price, t.amount, t.currency, t.broker,
                    {linked} AS campaign_events
               FROM transactions t JOIN security s ON s.id = t.security_id
-             WHERE t.external_id LIKE ? AND t.security_id IN ({_TOUCHED}) ORDER BY t.security_id, t.transaction_date, t.id""",
-        (adapter.external_prefix + "%", json.dumps(ids)),
+             WHERE t.external_id LIKE ? AND t.security_id IN ({_TOUCHED}){where} ORDER BY t.security_id, t.transaction_date, t.id""",
+        (adapter.external_prefix + "%", json.dumps(ids), *params),
     )
     return [{"transaction_id": int(t["id"]), "security_id": int(t["security_id"]), "symbol": t["symbol"] or t["name"], "name": t["name"],
              "transaction_type": t["transaction_type"], "transaction_date": t["transaction_date"], "shares": t["shares"], "price": t["price"], "amount": t["amount"],
@@ -1256,7 +1323,8 @@ def build_import_plan(
     path = Path(csv_path)
     if not path.is_file():
         raise FileNotFoundError(f"{adapter.source_label} CSV not found: {path}")
-    latest_date = _latest_transaction(conn)[2]
+    options = replace(options, portfolio_id=target_portfolio(conn, options.portfolio_id))
+    latest_date = _latest_transaction(conn, options.portfolio_id)[2]
     cache: dict[int, list[sqlite3.Row]] = {}
     seen: set[str] = set()
     pending: dict[str, dict[str, Any]] = {}
@@ -1264,14 +1332,15 @@ def build_import_plan(
     source_hash = _file_hash(path)
     aliases = _plan_aliases(conn, adapter, records, options)
     updates, conflicts = _masterdata_changes(conn, records, aliases)
-    removed = _removed_in_source(conn, adapter, records)
+    removed = _removed_in_source(conn, adapter, records, options.portfolio_id)
     touched ={int(r.security_id) for r in records if r.security_id is not None} | {int(a["security_id"]) for a in aliases if a.get("security_id") is not None}
-    latest_date, db_token = _db_state_token(conn, touched)
+    _, db_token = _db_state_token(conn, touched)
+    latest_date = _latest_transaction(conn, options.portfolio_id)[2]
     token_payload = {
         "file_sha256": source_hash, "db_state": db_token, "adapter": adapter.name, "rows": [record.primitive() for record in records],
         "masterdata": [updates, conflicts, aliases], "removed_in_source": removed,
         "options": {"create_securities": options.create_securities, "strategies": options.strategies, "campaign_opened_at": options.campaign_opened_at, "accept_aliases": options.accept_aliases, "start_campaigns": options.start_campaigns,
-                    "include_historical": options.include_historical, "remove_transactions": sorted(options.remove_transactions)},
+                    "include_historical": options.include_historical, "remove_transactions": sorted(options.remove_transactions), "portfolio_id": options.portfolio_id},
     }
     plan_token = hashlib.sha256(json.dumps(token_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return ImportPlan(str(path), source_hash, len(records), latest_date, db_token, plan_token, tuple(records), adapter.name, options, tuple(updates), tuple(conflicts), tuple(aliases),
@@ -1671,6 +1740,7 @@ def apply_import_plan(
         if locked.plan_token != expected_plan_token:
             raise TransactionImportError("import plan is stale; preview again before writing")
         fresh = locked
+        portfolio_id = fresh.options.portfolio_id  # resolved by build_import_plan (None only without the portfolio schema)
         approved = approved_of(fresh)
         # Rows that cannot be imported do not turn valid unrelated rows into silent writes; the result records them.
         blocked_rows = [r.source_row_number for r in fresh.records if r.classification in _BLOCKING_CLASSES]
@@ -1740,20 +1810,29 @@ def apply_import_plan(
                 )
                 external_id = adapter.external_prefix + (record.source_external_id or digest)
             final = replace(record, security_id=security_id, external_id=external_id)
-            cursor = conn.execute(
-                """INSERT INTO transactions(security_id, transaction_type, transaction_date, shares, price, amount, fees, taxes, currency, broker, external_id, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (final.security_id, final.transaction_type, final.transaction_date, final.shares, final.price, final.amount, final.fees,
-                 final.taxes, final.currency, final.broker, final.external_id, adapter.notes(final)),
-            )
+            values = (final.security_id, final.transaction_type, final.transaction_date, final.shares, final.price, final.amount, final.fees,
+                      final.taxes, final.currency, final.broker, final.external_id, adapter.notes(final))
+            if portfolio_id is None:
+                cursor = conn.execute(
+                    """INSERT INTO transactions(security_id, transaction_type, transaction_date, shares, price, amount, fees, taxes, currency, broker, external_id, notes)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values)
+            else:
+                cursor = conn.execute(
+                    """INSERT INTO transactions(security_id, transaction_type, transaction_date, shares, price, amount, fees, taxes, currency, broker, external_id, notes,
+                                                portfolio_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (*values, portfolio_id))
             inserted.append(int(cursor.lastrowid))
             finals.append(replace(final, matched_transaction_id=int(cursor.lastrowid)))
         affected = sorted({int(r.security_id) for r in finals} | {item["security_id"] for item in removed})
         for security_id in affected:
-            _rebuild_position(conn, security_id, finals)
+            _rebuild_position(conn, security_id, finals, portfolio_id=portfolio_id)
         for item in removed:  # the rebuild keeps the persisted realized gain; the gain the removed row had contributed goes with it
             if item["realized_gain"]:
-                conn.execute("UPDATE positions SET realized_gain = COALESCE(realized_gain, 0) - ? WHERE security_id = ?", (item["realized_gain"], item["security_id"]))
+                if portfolio_id is None:
+                    conn.execute("UPDATE positions SET realized_gain = COALESCE(realized_gain, 0) - ? WHERE security_id = ?", (item["realized_gain"], item["security_id"]))
+                else:
+                    conn.execute("UPDATE portfolio_position SET realized_gain = COALESCE(realized_gain, 0) - ? WHERE portfolio_id = ? AND security_id = ?",
+                                 (item["realized_gain"], portfolio_id, item["security_id"]))
 
         # Strategy assignment and campaign initialization for every held security the file documents.
         candidates = sorted(set(record_ids) | set(key_to_id.values()))

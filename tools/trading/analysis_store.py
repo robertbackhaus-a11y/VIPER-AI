@@ -6,6 +6,8 @@ transaction data.
 
 * ``analysis_case``: one analysis of one security - question, data stand, model, status, the proposal and its validity, the input
   fingerprint (to tell when new prices, news or portfolio changes call for a re-evaluation) and the complete result as JSON.
+  ``portfolio_id`` is the portfolio context the case was analysed in (a depot, or NULL = the total of all active depots; added by
+  ``Migrate-TradingPortfolios.py``): position, weight and risk of the case are those of that context.
 * ``analysis_step``: one row per step of the workflow (observe, assess, quantitative, qualitative, hypothesis, evidence check,
   risk context, decide, review) with its kind (``deterministic`` / ``llm``) and output - the protocol shown in the Intelligence page.  The row
   is written when the step starts (``finished_at`` and ``output_json`` NULL) and completed when it ends, so the page shows the running step:
@@ -31,6 +33,7 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS analysis_case (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     security_id         INTEGER NOT NULL,
+    portfolio_id        INTEGER,
     question            TEXT NOT NULL,
     status              TEXT NOT NULL CHECK (status IN ('RUNNING', 'DONE', 'INSUFFICIENT_DATA', 'FAILED')),
     trigger             TEXT NOT NULL DEFAULT 'manual',
@@ -105,10 +108,21 @@ def available(conn: sqlite3.Connection) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'analysis_case'").fetchone() is not None
 
 
+def has_portfolio(conn: sqlite3.Connection) -> bool:
+    """True when ``analysis_case`` records the portfolio context (``Migrate-TradingPortfolios.py``)."""
+    return any(r[1] == "portfolio_id" for r in conn.execute("PRAGMA main.table_info(analysis_case)"))
+
+
 def create_case(conn: sqlite3.Connection, *, security_id: int, question: str, thread_id: str, as_of: str, model: str, trigger: str = "manual",
-                supersedes_id: Optional[int] = None) -> int:
-    cur = conn.execute("INSERT INTO analysis_case(security_id, question, status, trigger, thread_id, supersedes_id, as_of, model, created_at) "
-                       "VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)", (security_id, question, trigger, thread_id, supersedes_id, as_of, model, now()))
+                supersedes_id: Optional[int] = None, portfolio_id: Optional[int] = None) -> int:
+    if has_portfolio(conn):
+        cur = conn.execute("INSERT INTO analysis_case(security_id, portfolio_id, question, status, trigger, thread_id, supersedes_id, as_of, model, created_at) "
+                           "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)", (security_id, portfolio_id, question, trigger, thread_id, supersedes_id, as_of, model, now()))
+    elif portfolio_id is not None:
+        raise ValueError("analysis_case has no portfolio_id yet (Migrate-TradingPortfolios.py --write)")
+    else:
+        cur = conn.execute("INSERT INTO analysis_case(security_id, question, status, trigger, thread_id, supersedes_id, as_of, model, created_at) "
+                           "VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)", (security_id, question, trigger, thread_id, supersedes_id, as_of, model, now()))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -174,8 +188,17 @@ def reopen_case(conn: sqlite3.Connection, case_id: int) -> None:
     conn.commit()
 
 
+def _select(conn: sqlite3.Connection) -> str:
+    """The case columns with symbol, name and the name of the portfolio context (``Gesamt`` for NULL)."""
+    if has_portfolio(conn) and conn.execute("SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = 'portfolio'").fetchone():
+        return ("SELECT c.*, s.symbol, s.name, COALESCE(pf.name, 'Gesamt') AS portfolio_name FROM analysis_case c LEFT JOIN security s ON s.id = c.security_id "
+                "LEFT JOIN main.portfolio pf ON pf.id = c.portfolio_id")
+    return "SELECT c.*, s.symbol, s.name, 'Gesamt' AS portfolio_name FROM analysis_case c LEFT JOIN security s ON s.id = c.security_id"
+
+
 def _case(row: sqlite3.Row, with_result: bool) -> dict[str, Any]:
     out = {k: row[k] for k in row.keys() if k not in ("result_json", "fingerprint_json")}
+    out.setdefault("portfolio_id", None)
     out["fingerprint"] = _load(row["fingerprint_json"])
     if with_result:
         out["result"] = _load(row["result_json"])
@@ -183,7 +206,7 @@ def _case(row: sqlite3.Row, with_result: bool) -> dict[str, Any]:
 
 
 def get_case(conn: sqlite3.Connection, case_id: int) -> Optional[dict[str, Any]]:
-    row = conn.execute("SELECT c.*, s.symbol, s.name FROM analysis_case c LEFT JOIN security s ON s.id = c.security_id WHERE c.id = ?", (case_id,)).fetchone()
+    row = conn.execute(_select(conn) + " WHERE c.id = ?", (case_id,)).fetchone()
     if row is None:
         return None
     case = _case(row, True)
@@ -193,7 +216,7 @@ def get_case(conn: sqlite3.Connection, case_id: int) -> Optional[dict[str, Any]]
 
 
 def list_cases(conn: sqlite3.Connection, security_id: Optional[int] = None, limit: int = 200) -> list[dict[str, Any]]:
-    sql = "SELECT c.*, s.symbol, s.name FROM analysis_case c LEFT JOIN security s ON s.id = c.security_id"
+    sql = _select(conn)
     params: list[Any] = []
     if security_id is not None:
         sql += " WHERE c.security_id = ?"
@@ -203,8 +226,10 @@ def list_cases(conn: sqlite3.Connection, security_id: Optional[int] = None, limi
     return [_case(r, False) for r in conn.execute(sql, params)]
 
 
-def latest_per_security(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """The current thesis of every analysed security: its newest finished case (DONE or INSUFFICIENT_DATA)."""
-    rows = conn.execute("SELECT c.*, s.symbol, s.name FROM analysis_case c LEFT JOIN security s ON s.id = c.security_id WHERE c.id IN ("
-                        "SELECT MAX(id) FROM analysis_case WHERE status IN ('DONE', 'INSUFFICIENT_DATA') GROUP BY security_id) ORDER BY s.symbol")
+def latest_per_security(conn: sqlite3.Connection, portfolio_id: Optional[int] = None) -> list[dict[str, Any]]:
+    """The current thesis of every analysed security in one portfolio context (``None`` = the total): its newest finished case (DONE or
+    INSUFFICIENT_DATA) of that context."""
+    context, params = (" AND portfolio_id IS ?", (portfolio_id,)) if has_portfolio(conn) else ("", ())
+    rows = conn.execute(_select(conn) + " WHERE c.id IN ("
+                        f"SELECT MAX(id) FROM analysis_case WHERE status IN ('DONE', 'INSUFFICIENT_DATA'){context} GROUP BY security_id) ORDER BY s.symbol", params)
     return [_case(r, True) for r in rows]

@@ -155,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remove-transaction", action="append", default=[], type=int, metavar="TRANSACTION_ID", dest="remove_transaction",
                         help="Delete a transaction the check lists as no longer in the export (Parqet replaced or deleted it at the source); only ids of that list are accepted (repeatable)")
     parser.add_argument("--no-campaign-start", action="store_true", help="Do not derive and start a Swing campaign automatically (an explicit --campaign-opened-at still starts one)")
+    parser.add_argument("--portfolio-id", type=int, default=None, help="Target portfolio (depot) of the import; default: the default portfolio")
     parser.add_argument("--json", action="store_true", help="Emit deterministic JSON")
     return parser
 
@@ -194,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         # reconciliation of the file against the database.
         common = dict(fmt=args.format, create_securities=args.create_securities, strategies=args.strategy, campaign_opened_at=args.campaign_opened_at,
                       include_historical=args.include_historical, accept_aliases=args.accept_alias, start_campaigns=not args.no_campaign_start,
-                      remove_transactions=args.remove_transaction)
+                      remove_transactions=args.remove_transaction, portfolio_id=args.portfolio_id)
         if not args.write:
             result = import_workflow.check(args.db_path, args.csv, **common)
             print(json.dumps(result, sort_keys=True)) if args.json else _print_human(result, write=False)

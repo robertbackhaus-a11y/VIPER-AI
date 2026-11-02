@@ -42,6 +42,11 @@ h3 { font-size: .95rem; margin: 14px 0 8px; color: var(--muted); font-weight: 60
 .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; box-shadow: 0 0 6px var(--accent); }
 .status .dot.err { background: var(--down); box-shadow: 0 0 6px var(--down); }
 .status .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.depot { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: .85rem; white-space: nowrap; }
+.depot[hidden] { display: none; }
+.depot { margin-left: auto; }
+.depot:not([hidden]) + .status { margin-left: 0; }
+.depot select { padding: 3px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
 .gear { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); flex: none; }
 .gear:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
 .gear.active { color: var(--accent); border-color: #1f4a35; }

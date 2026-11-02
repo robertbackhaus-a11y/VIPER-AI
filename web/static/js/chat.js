@@ -3,7 +3,7 @@
 // Chat: questions to the local Ollama model, which reads through the READ tools only (/api/chat, streamed as Server-Sent Events).
 // The transcript shows user, answer, thinking, tool calls and errors separately; tool results are never shown, only name, duration and size.
 
-import { el, get, post } from "./core.js";
+import { el, get, portfolioHeaders, post } from "./core.js";
 
 export async function render(target) {
   const status = await get("/api/chat/status");
@@ -25,7 +25,7 @@ export async function render(target) {
     let answer = null, thinking = null;
     const statusLine = add("status", "…");
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+      const response = await fetch("/api/chat", { method: "POST", headers: portfolioHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ text }) });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

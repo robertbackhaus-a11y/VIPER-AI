@@ -649,6 +649,8 @@ class Tools:
 
             busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
 
+            portfolios = self._load_runtime_trading_module("portfolio_scope").list_portfolios(conn)
+
             return {
                 "ok": True,
                 "database_path": str(db_path),
@@ -660,6 +662,7 @@ class Tools:
                 "journal_mode": journal_mode,
                 "foreign_keys": bool(foreign_keys),
                 "busy_timeout_ms": busy_timeout,
+                "portfolios": [{k: p[k] for k in ("id", "name", "active", "default", "transactions", "positions")} for p in portfolios],
                 "elapsed_ms": round(
                     (time.perf_counter() - started) * 1000,
                     3,
@@ -690,6 +693,8 @@ class Tools:
         - journal mode
         - foreign key mode
         - busy timeout
+        - portfolios: the depots (id, name, active, default, transaction and open-position count); their id is the
+          portfolio_id of the portfolio tools (run_trading_orchestrator, get_sector_overview, get_effective_exposure)
         """
 
         return await asyncio.to_thread(self._database_status_sync)
@@ -752,15 +757,15 @@ class Tools:
     # Portfolio-level read-only orchestration
     # ============================================================
 
-    def _run_trading_orchestrator_sync(self, as_of: str | None) -> dict:
+    def _run_trading_orchestrator_sync(self, as_of: str | None, portfolio_id: int | None = None) -> dict:
         orchestrator = self._load_runtime_trading_module("trading_orchestrator")
-        conn = self._readonly_import_connection(self.valves.database_path)
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
         try:
             return orchestrator.run_trading_orchestrator(conn, as_of=as_of).primitive()
         finally:
             conn.close()
 
-    async def run_trading_orchestrator(self, as_of: str | None = None) -> dict:
+    async def run_trading_orchestrator(self, as_of: str | None = None, portfolio_id: int | None = None) -> dict:
         """Return one read-only, portfolio-level recommendation report.
 
         Current evaluation is used when ``as_of`` is omitted.  This operation
@@ -775,9 +780,12 @@ class Tools:
         these figures as they are; do not recount, recompute totals or
         derive a new recommendation. detail=true returns the complete
         result incl. presentation_summary and rendered_summary_de.
+
+        :param as_of: evaluation date YYYY-MM-DD (default: current)
+        :param portfolio_id: one depot (id from database_status.portfolios); omitted = all active depots consolidated
         """
         try:
-            result = await asyncio.to_thread(self._run_trading_orchestrator_sync, as_of)
+            result = await asyncio.to_thread(self._run_trading_orchestrator_sync, as_of, portfolio_id)
             return {"ok": True, "operation": "run_trading_orchestrator", "result": result}
         except Exception as exc:
             return {"ok": False, "operation": "run_trading_orchestrator", "error": "ORCHESTRATOR_FAILED", "message": str(exc)}
@@ -1127,15 +1135,15 @@ class Tools:
         except Exception as exc:
             return {"ok": False, "operation": "get_watchlist", "error": "WATCHLIST_VIEW_FAILED", "message": str(exc)}
 
-    def _get_sector_overview_sync(self, as_of: str | None, lookthrough: bool = True) -> dict:
+    def _get_sector_overview_sync(self, as_of: str | None, lookthrough: bool = True, portfolio_id: int | None = None) -> dict:
         overview = self._load_runtime_trading_module("sector_overview")
-        conn = self._readonly_import_connection(self.valves.database_path)
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
         try:
             return overview.public_payload(overview.build_sector_overview(conn, as_of=as_of, lookthrough=bool(lookthrough)))
         finally:
             conn.close()
 
-    async def get_sector_overview(self, as_of: str | None = None, lookthrough: bool = True) -> dict:
+    async def get_sector_overview(self, as_of: str | None = None, lookthrough: bool = True, portfolio_id: int | None = None) -> dict:
         """The open positions grouped by sector (read-only: no web, no DB write, no order, no change to any guard).
 
         Per sector: EUR market value, share of the invested value, number of positions, value-weighted daily change, the sector-guard limit and status
@@ -1146,21 +1154,22 @@ class Tools:
 
         :param as_of: evaluation date YYYY-MM-DD (default: current)
         :param lookthrough: true (default) = split ETFs into their sector allocation; false = every ETF stays one position
+        :param portfolio_id: one depot (id from database_status.portfolios); omitted = all active depots consolidated
         """
         try:
-            return await asyncio.to_thread(self._get_sector_overview_sync, as_of, lookthrough)
+            return await asyncio.to_thread(self._get_sector_overview_sync, as_of, lookthrough, portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "get_sector_overview", "error": "SECTOR_OVERVIEW_FAILED", "message": str(exc)}
 
-    def _get_effective_exposure_sync(self, as_of: str | None, top: int) -> dict:
+    def _get_effective_exposure_sync(self, as_of: str | None, top: int, portfolio_id: int | None = None) -> dict:
         exposure = self._load_runtime_trading_module("effective_exposure")
-        conn = self._readonly_import_connection(self.valves.database_path)
+        conn = self._readonly_import_connection(self.valves.database_path, portfolio_id)
         try:
             return exposure.build_effective_exposure(conn, as_of=as_of, top=top)
         finally:
             conn.close()
 
-    async def get_effective_exposure(self, as_of: str | None = None, top: int = 25) -> dict:
+    async def get_effective_exposure(self, as_of: str | None = None, top: int = 25, portfolio_id: int | None = None) -> dict:
         """Effective single-name exposure of the open positions (read-only: no web, no DB write, no order, no change to any guard).
 
         Per company: direct EUR value and weight + the share of the same company in every held ETF (the provider's holdings; a synthetic ETF uses its index
@@ -1170,9 +1179,10 @@ class Tools:
 
         :param as_of: evaluation date YYYY-MM-DD (default: current)
         :param top: number of companies returned, largest effective exposure first (default 25, at most 40)
+        :param portfolio_id: one depot (id from database_status.portfolios); omitted = all active depots consolidated
         """
         try:
-            return await asyncio.to_thread(self._get_effective_exposure_sync, as_of, max(1, min(int(top), 40)))
+            return await asyncio.to_thread(self._get_effective_exposure_sync, as_of, max(1, min(int(top), 40)), portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "get_effective_exposure", "error": "EFFECTIVE_EXPOSURE_FAILED", "message": str(exc)}
 
@@ -1347,14 +1357,14 @@ class Tools:
 
     def _transaction_import_sync(self, write: bool, file_path: str, format: str, create_securities: bool, include_historical: bool,
                                  strategies: list[str] | None, campaign_opened_at: list[str] | None, plan_token: str | None, accept_aliases: list[str] | None = None,
-                                 start_campaigns: bool = True, remove_transactions: list[int] | None = None) -> dict:
+                                 start_campaigns: bool = True, remove_transactions: list[int] | None = None, portfolio_id: int | None = None) -> dict:
         workflow = self._load_runtime_trading_module("import_workflow")
         if format not in ("parqet", "canonical"):
             raise ValueError("format must be parqet or canonical")
         path = workflow.validate_source_file(file_path)
         common = dict(fmt=format, create_securities=bool(create_securities), strategies=list(strategies or []), campaign_opened_at=list(campaign_opened_at or []),
                       include_historical=bool(include_historical), accept_aliases=list(accept_aliases or []), start_campaigns=bool(start_campaigns),
-                      remove_transactions=[int(item) for item in (remove_transactions or [])])
+                      remove_transactions=[int(item) for item in (remove_transactions or [])], portfolio_id=None if portfolio_id is None else int(portfolio_id))
         if write:
             return workflow.compact(workflow.run(self.valves.database_path, path, expected_plan_token=plan_token, **common))
         return workflow.compact(workflow.check(self.valves.database_path, path, **common))
@@ -1370,6 +1380,7 @@ class Tools:
         accept_aliases: list[str] | None = None,
         start_campaigns: bool = True,
         remove_transactions: list[int] | None = None,
+        portfolio_id: int | None = None,
     ) -> dict:
         """ACTION class (for the desktop GUI only; reads a local CSV, writes nothing): the complete dry run of a transaction export.
 
@@ -1387,9 +1398,10 @@ class Tools:
         :param accept_aliases: optional list of "IDENTIFIER=SYMBOL": the identifier (ISIN) of the file IS that existing security (ADR / GDR / other listing); needs the same WKN on both sides
         :param start_campaigns: false = no Swing campaign is derived and started automatically (the open item says so); an explicit start date in campaign_opened_at still starts one
         :param remove_transactions: optional transaction ids from diff.removed_in_source (rows a Parqet export no longer contains, e.g. a placeholder replaced by the real trades) to delete with the import
+        :param portfolio_id: target depot of the import (id from database_status.portfolios); omitted = the default depot. Duplicates and removed rows are judged within it.
         """
         try:
-            return await asyncio.to_thread(self._transaction_import_sync, False, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, None, accept_aliases, start_campaigns, remove_transactions)
+            return await asyncio.to_thread(self._transaction_import_sync, False, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, None, accept_aliases, start_campaigns, remove_transactions, portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "check_transaction_import", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:300]}
 
@@ -1405,6 +1417,7 @@ class Tools:
         accept_aliases: list[str] | None = None,
         start_campaigns: bool = True,
         remove_transactions: list[int] | None = None,
+        portfolio_id: int | None = None,
     ) -> dict:
         """ACTION (writes the database; for the desktop GUI only): import a transaction export in ONE transaction, after check_transaction_import.
 
@@ -1425,11 +1438,12 @@ class Tools:
         :param accept_aliases: same value as in the check
         :param start_campaigns: same value as in the check
         :param remove_transactions: same value as in the check
+        :param portfolio_id: same value as in the check (target depot)
         """
         try:
             if not plan_token:
                 raise ValueError("plan_token is required (run check_transaction_import first)")
-            return await asyncio.to_thread(self._transaction_import_sync, True, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, plan_token, accept_aliases, start_campaigns, remove_transactions)
+            return await asyncio.to_thread(self._transaction_import_sync, True, file_path, format, create_securities, include_historical, strategies, campaign_opened_at, plan_token, accept_aliases, start_campaigns, remove_transactions, portfolio_id)
         except Exception as exc:
             return {"ok": False, "operation": "import_transactions", "result": "ERROR", "changed": False, "error": type(exc).__name__, "message": str(exc)[:300]}
 
@@ -1485,8 +1499,10 @@ class Tools:
         cls._runtime_module_cache[module_name] = module
         return module
 
-    @staticmethod
-    def _readonly_import_connection(database_path: str) -> sqlite3.Connection:
+    @classmethod
+    def _readonly_import_connection(cls, database_path: str, portfolio_id: Any = None) -> sqlite3.Connection:
+        """A read-only connection in the portfolio context ``portfolio_id`` (an id = that depot, None = all active depots consolidated; see
+        ``portfolio_scope.scope``): every engine module reading it sees only that context."""
         db_path = Path(database_path)
         if not db_path.is_file():
             raise FileNotFoundError("Trading database not found")
@@ -1497,6 +1513,12 @@ class Tools:
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
+        try:
+            scope = cls._load_runtime_trading_module("portfolio_scope")
+            scope.scope(conn, scope.parse_portfolio_id(portfolio_id))
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
 

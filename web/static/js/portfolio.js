@@ -94,6 +94,7 @@ function txTable(rows, withSecurity) {
     { key: "taxes", label: "Steuern", num: true, fmt: (v) => num(v) },
     { key: "currency", label: "Währung" },
     { key: "broker", label: "Broker" },
+    ...(rows.some((r) => r.portfolio_name) && new Set(rows.map((r) => r.portfolio_id)).size > 1 ? [{ key: "portfolio_name", label: "Depot" }] : []),
   ];
   return dataTable(rows, columns, { sortKey: "transaction_date", empty: "Keine Transaktionen" });
 }

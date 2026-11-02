@@ -3,11 +3,16 @@
 // Import: a transaction export (Parqet or canonical CSV). "Prüfen" is a dry run (difference and reconciliation, nothing written); open points
 // are decided here and need a new check; "Importieren" only after a valid check of the unchanged form, with its token and a confirmation.
 
-import { el, get, panel, post, vmTable } from "./core.js";
+import { el, get, panel, portfolioHeaders, portfolioId, post, vmTable } from "./core.js";
 
 export async function render(target) {
-  const options = await get("/api/import/options");
+  const [options, depotList] = await Promise.all([get("/api/import/options"), get("/api/portfolios")]);
   const file = el("input", { type: "file", accept: ".csv,text/csv" });
+  // target depot: the depot of the header, otherwise the default depot; duplicates and positions are judged within it
+  const activeDepots = (depotList.portfolios || []).filter((p) => p.active);
+  const depot = el("select", { title: "Zieldepot: neue Transaktionen werden diesem Depot zugeordnet" },
+    activeDepots.map((p) => el("option", { value: String(p.id) }, p.name)));
+  depot.value = activeDepots.some((p) => String(p.id) === portfolioId()) ? portfolioId() : String((activeDepots.find((p) => p.default) || activeDepots[0] || {}).id ?? "");
   const format = el("select", {}, options.formats.map((f) => el("option", { value: f }, f)));
   const create = el("input", { type: "checkbox" });
   const historical = el("input", { type: "checkbox" });
@@ -17,10 +22,11 @@ export async function render(target) {
   const decisions = { strategies: {}, aliases: {}, removals: new Set() };
   let uploaded = null, checked = null;
 
-  const form = () => ({ file_id: uploaded && uploaded.file_id, format_text: format.value, create_securities: create.checked, include_historical: historical.checked,
+  const form = () => ({ file_id: uploaded && uploaded.file_id, portfolio_id: depot.value ? Number(depot.value) : null, format_text: format.value,
+    create_securities: create.checked, include_historical: historical.checked,
     strategies: { ...decisions.strategies }, aliases: { ...decisions.aliases }, removals: [...decisions.removals].sort() });
   const invalidate = () => { checked = null; importBtn.disabled = true; };
-  [format, create, historical].forEach((i) => i.addEventListener("change", invalidate));
+  [depot, format, create, historical].forEach((i) => i.addEventListener("change", invalidate));
   file.addEventListener("change", () => { uploaded = null; invalidate(); decisions.strategies = {}; decisions.aliases = {}; decisions.removals = new Set(); });
 
   const show = (view) => {
@@ -65,7 +71,7 @@ export async function render(target) {
     try {
       if (!uploaded) {
         const f = file.files[0];
-        uploaded = await (await fetch(`/api/import/upload?name=${encodeURIComponent(f.name)}`, { method: "POST", body: f })).json();
+        uploaded = await (await fetch(`/api/import/upload?name=${encodeURIComponent(f.name)}`, { method: "POST", body: f, headers: portfolioHeaders() })).json();
         if (!uploaded.file_id) throw new Error(uploaded.detail || "Upload fehlgeschlagen");
       }
       const request = form();
@@ -92,7 +98,7 @@ export async function render(target) {
 
   target.replaceChildren(
     el("div", { class: "head" }, el("div", {}, el("h1", {}, "Import"), el("div", { class: "muted small" }, "Parqet-Export oder kanonisches CSV · Prüfen schreibt nichts"))),
-    panel(null, el("div", { class: "head" }, file, format, el("label", {}, create, " neue Wertpapiere anlegen"), el("label", {}, historical, " historische Zeilen einbeziehen"), checkBtn, importBtn),
+    panel(null, el("div", { class: "head" }, file, activeDepots.length ? el("label", {}, "Depot ", depot) : "", format, el("label", {}, create, " neue Wertpapiere anlegen"), el("label", {}, historical, " historische Zeilen einbeziehen"), checkBtn, importBtn),
       el("p", { class: "muted small" }, "Die Datei wird nur in den Einstellungsordner kopiert, damit die Prüfung sie lesen kann. Die Seite startet nie eine Campaign.")),
     out);
 }

@@ -140,6 +140,7 @@ Alle `Migrate-*`-Skripte verlangen `metadata.schema_version == "2.0"` und sind e
 | `Migrate-TradingCapitalState.py` | `portfolio_capital_state` | `portfolio_capital_state_schema_version` |
 | `Migrate-TradingCorporateActions.py` | `corporate_action` | `corporate_action_schema_version` |
 | `Migrate-TradingAnalysisCases.py` | `analysis_case`, `analysis_step` (Analysefälle des Reasoning-Workflows, `analysis_store.py`) | `analysis_case_schema_version` |
+| `Migrate-TradingPortfolios.py` | mehrere Depots (`portfolio_scope.py`): `portfolio` mit Standard-Depot 1 „Main“, `transactions.portfolio_id` (alle bestehenden Transaktionen → Depot 1; `external_id` eindeutig je Depot), `portfolio_position` je Depot und Wertpapier; die Tabelle `positions` wird zur View, die alle Depots je Wertpapier addiert (bei einem Depot exakt die bisherigen Zeilen); `analysis_case.portfolio_id` (NULL = Gesamt). Standard ist der Trockenlauf, `--write` mit Sicherungskopie und Vorher/Nachher-Vergleich in einer Transaktion | `portfolio_schema_version` |
 
 | Manager | Unterbefehle | Kapselt |
 |---|---|---|

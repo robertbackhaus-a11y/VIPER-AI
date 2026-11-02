@@ -140,6 +140,7 @@ All `Migrate-*` scripts require `metadata.schema_version == "2.0"` and are dry-r
 | `Migrate-TradingCapitalState.py` | `portfolio_capital_state` | `portfolio_capital_state_schema_version` |
 | `Migrate-TradingCorporateActions.py` | `corporate_action` | `corporate_action_schema_version` |
 | `Migrate-TradingAnalysisCases.py` | `analysis_case`, `analysis_step` (analysis cases of the reasoning workflow, `analysis_store.py`) | `analysis_case_schema_version` |
+| `Migrate-TradingPortfolios.py` | several depots (`portfolio_scope.py`): `portfolio` with default depot 1 "Main", `transactions.portfolio_id` (every existing transaction → depot 1; `external_id` unique per depot), `portfolio_position` per depot and security; the table `positions` becomes a view adding up all depots per security (with one depot exactly the former rows); `analysis_case.portfolio_id` (NULL = total). Dry run by default, `--write` with a backup copy and a before/after comparison in one transaction | `portfolio_schema_version` |
 
 | Manager | Subcommands | Wraps |
 |---|---|---|

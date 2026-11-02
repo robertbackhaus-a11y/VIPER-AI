@@ -8,6 +8,9 @@ The language model is the local Ollama of the settings, asked for JSON answers. 
 an order.  "Abbrechen" closes the HTTP connection of the running model call (the ``CancelToken`` of the Ollama client): the step and the case end
 as FAILED and can be resumed; a deterministic step still finishes, the next model call does not start.  Without the migration
 (``Migrate-TradingAnalysisCases.py --write``) the page says so and nothing is written.
+
+A new analysis is made in the portfolio context chosen in the header (one depot or the total) and records it; the theses shown are those of that
+context, and whether a case is stale is judged in the context the case was made in.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 
 from .deps import ollama_client, reason_codes
+from .engine import PORTFOLIO
 from .views import jsonable
 
 LLM_TIMEOUT_S = 300.0  # per wait for Ollama (first byte, then every chunk), not per analysis
@@ -72,25 +76,34 @@ def register(app: FastAPI, state) -> None:
         tokens[case_id] = token
         task.add_done_callback(lambda _t: (running.pop(case_id, None), tokens.pop(case_id, None)))
 
-    def overview() -> dict:
+    def stale(conn, vr, case: dict) -> list:
+        """``staleness`` read in the portfolio context of the case (the connection is re-scoped for it)."""
+        try:
+            engine.module("portfolio_scope").scope(conn, case.get("portfolio_id"))
+        except ValueError:
+            return ["Depot der Analyse existiert nicht mehr"]
+        return vr.staleness(conn, case)
+
+    def overview(portfolio_id) -> dict:
         vr, store = modules()
         conn = vr.readonly(engine.db_path)
         try:
             if not store.available(conn):
                 return {"available": False, "message": "Die Analyse-Tabellen fehlen. Einmalig ausführen: viper-ai run Migrate-TradingAnalysisCases.py --write"}
-            theses = store.latest_per_security(conn)
+            theses = store.latest_per_security(conn, portfolio_id)
             for case in theses:
-                case["stale"] = vr.staleness(conn, case)
+                case["stale"] = stale(conn, vr, case)
             cases = store.list_cases(conn, limit=50)
             for case in cases:
                 case["interrupted"] = case["status"] == "RUNNING" and case["id"] not in running
-            return {"available": True, "theses": theses, "cases": cases, "running": sorted(running)}
+            return {"available": True, "theses": theses, "cases": cases, "running": sorted(running),
+                    "portfolio": {"id": portfolio_id, "name": engine.module("portfolio_scope").label(conn, portfolio_id)}}
         finally:
             conn.close()
 
     @app.get("/api/intelligence")
     async def intelligence():
-        return await in_thread(overview)
+        return await in_thread(overview, PORTFOLIO.get())
 
     @app.get("/api/intelligence/cases/{case_id}")
     async def case(case_id: int):
@@ -101,7 +114,7 @@ def register(app: FastAPI, state) -> None:
                 found = store.get_case(conn, case_id) if store.available(conn) else None
                 if found is None:
                     return None
-                found["stale"] = vr.staleness(conn, found) if found["status"] in ("DONE", "INSUFFICIENT_DATA") else []
+                found["stale"] = stale(conn, vr, found) if found["status"] in ("DONE", "INSUFFICIENT_DATA") else []
                 found["interrupted"] = found["status"] == "RUNNING" and case_id not in running
                 found["cancel_requested"] = case_id in tokens and tokens[case_id].cancelled
                 found["display"] = display(found)
@@ -118,13 +131,30 @@ def register(app: FastAPI, state) -> None:
 
     @app.post("/api/intelligence/analyze")
     async def analyze(request: Request):
-        """A new analysis of one security (``supersedes_id``: the re-evaluation of an earlier case)."""
+        """A new analysis of one security in the portfolio context of the header (``supersedes_id``: the re-evaluation of an earlier case, made in
+        that case's context)."""
         body = await request.json()
-        vr, _ = modules()
+        vr, store = modules()
+        portfolio_id = PORTFOLIO.get()
+        if body.get("supersedes_id") is not None:
+            def context_of(case_id: int):
+                conn = vr.readonly(engine.db_path)
+                try:
+                    found = store.get_case(conn, case_id)
+                finally:
+                    conn.close()
+                if found is None:
+                    raise ValueError(f"Analyse {case_id} nicht gefunden")
+                return found.get("portfolio_id")
+
+            try:
+                portfolio_id = await in_thread(context_of, int(body["supersedes_id"]))
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
         try:
             case_id = await in_thread(lambda: vr.start_case(engine.db_path, int(body["security_id"]), question=str(body.get("question") or ""),
                                                              model=state.settings.ollama_model, trigger=str(body.get("trigger") or "manual"),
-                                                             supersedes_id=body.get("supersedes_id")))
+                                                             supersedes_id=body.get("supersedes_id"), portfolio_id=portfolio_id))
         except (KeyError, ValueError, RuntimeError) as exc:
             raise HTTPException(422, str(exc)) from exc
         token = ollama_client.CancelToken()
@@ -153,7 +183,7 @@ def register(app: FastAPI, state) -> None:
 
     @app.get("/api/intelligence/securities")
     async def securities():
-        """The securities an analysis can be started for: the holdings first, then the watchlist."""
+        """The securities an analysis can be started for: the holdings (of the header's portfolio context) first, then the watchlist."""
         def load():
             conn = engine.connect_readonly()
             try:

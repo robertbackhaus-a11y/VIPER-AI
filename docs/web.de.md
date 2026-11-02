@@ -41,6 +41,7 @@ viper-ai start
 | Pfad | Inhalt | Quelle |
 |---|---|---|
 | `GET /api/status` | Version, Datenbankstatus, Ollama-Status (echte Prüfung mit kurzem Timeout: erreichbar und gewähltes Modell vorhanden), Pfad, Hinweise | `database_status`, Ollama |
+| `GET /api/portfolios`, `POST /api/portfolios` (`name`), `POST /api/portfolios/{id}` (`name`, `description`, `active`), `POST /api/portfolios/{id}/delete` | Depots auflisten, anlegen, umbenennen, aktivieren/deaktivieren, löschen (nur ohne Transaktionen, nie das Standard-Depot) | `portfolio_scope` |
 | `GET /api/portfolio` | offene Positionen mit Marktwert, Einstandswert, unrealisiertem Ergebnis, Tagesänderung; Summen | `portfolio_history.holdings` |
 | `GET /api/portfolio/history` | Tageswerte (investiertes Kapital, Marktwert, Nettozufluss, Dividenden in EUR), Kennzahlen je Zeitraum, fehlende Kurse, EZB-Stand | `portfolio_history.portfolio_history` |
 | `GET /api/transactions` | gespeicherte Transaktionen, neueste zuerst (`security_id`, `limit`) | `portfolio_history.transactions` |
@@ -59,6 +60,12 @@ viper-ai start
 | `POST /api/action/{tool}` | eine GUI-Aktion mit ihren Argumenten als JSON | `GUI_ACTIONS` |
 
 Die OpenAPI-Beschreibung liegt unter `/api/docs`.
+
+**Depot-Kontext:** Jede Anfrage trägt den Header `X-Viper-Portfolio` (Depot-ID oder `all` = Gesamt; der Umschalter im Kopf der Seite setzt ihn, die Wahl gilt für die
+Sitzung des Browsers). Alle lesenden Endpunkte rechnen in diesem Kontext: Gesamt fasst alle aktiven Depots zusammen (gleiche Wertpapiere mit Stückzahl und Einstand
+addiert), ein Depot zeigt nur seine Daten. Watchlist, Marktdaten, Fundamentaldaten, News und Stammdaten sind global. Ein Import geht in das auf der Seite Import
+gewählte Zieldepot (`portfolio_id`); eine Intelligence-Analyse speichert ihren Depot-Kontext. Ohne die Migration `viper-ai run Migrate-TradingPortfolios.py --write`
+gibt es nur das bisherige Depot und keinen Umschalter.
 
 ## 4. Berechnungsgrundlagen
 

@@ -5,11 +5,56 @@
 
 import { el, get, kv, panel, post } from "./core.js";
 
+/** Depotverwaltung: create, rename, (de)activate; delete only a depot without transactions (the server refuses otherwise). */
+async function depotPanel() {
+  const box = el("div");
+  const message = el("div");
+  const refresh = async () => {
+    const data = await get("/api/portfolios");
+    if (!data.available) {
+      box.replaceChildren(el("p", { class: "muted small" }, "Mehrere Depots sind noch nicht eingerichtet. Einmalig ausführen: viper-ai run Migrate-TradingPortfolios.py --write"));
+      return;
+    }
+    const run = async (fn, ok) => {
+      try {
+        const r = await fn();
+        if (r && r.ok === false) throw new Error(r.message || "abgelehnt");
+        message.replaceChildren(el("div", { class: "note ok" }, ok));
+        window.dispatchEvent(new Event("viper:depots"));
+        await refresh();
+      } catch (error) {
+        message.replaceChildren(el("div", { class: "note error" }, error.message));
+      }
+    };
+    const rows = data.portfolios.map((p) => {
+      const name = el("input", { value: p.name, style: "width:100%" });
+      return el("tr", {},
+        el("td", {}, name),
+        el("td", { class: "num" }, String(p.transactions)), el("td", { class: "num" }, String(p.positions)),
+        el("td", {}, p.active ? "aktiv" : "deaktiviert", p.default ? " · Standard" : ""),
+        el("td", {},
+          el("button", { onclick: () => run(() => post(`/api/portfolios/${p.id}`, { name: name.value }), `Depot ${name.value} gespeichert.`) }, "Umbenennen"), " ",
+          el("button", { onclick: () => run(() => post(`/api/portfolios/${p.id}`, { active: !p.active }), `Depot ${p.name} ${p.active ? "deaktiviert" : "aktiviert"}.`) },
+            p.active ? "Deaktivieren" : "Aktivieren"), " ",
+          p.default || p.transactions ? "" : el("button", { class: "danger", onclick: () => confirm(`Depot ${p.name} löschen?`) && run(() => post(`/api/portfolios/${p.id}/delete`), `Depot ${p.name} gelöscht.`) }, "Löschen")));
+    });
+    const newName = el("input", { placeholder: "Name des neuen Depots" });
+    box.replaceChildren(
+      el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["Name", "Transaktionen", "Positionen", "Status", ""].map((h) => el("th", {}, h)))),
+        el("tbody", {}, rows))),
+      el("div", { class: "head", style: "margin-top:10px" }, newName,
+        el("button", { class: "primary", onclick: () => run(() => post("/api/portfolios", { name: newName.value }), `Depot ${newName.value} angelegt.`) }, "Depot anlegen")),
+      el("p", { class: "muted small" }, "Gesamt fasst alle aktiven Depots zusammen. Löschen geht nur ohne Transaktionen; das Standard-Depot bleibt immer erhalten."));
+  };
+  await refresh();
+  return panel("Depots", box, message);
+}
+
 const FIELDS = [["ollama_base_url", "Ollama-URL"], ["ollama_model", "Ollama-Modell"], ["trading_db_path", "Datenbank"],
   ["refresh_interval_s", "Aktualisierung (Sekunden)"], ["think_enabled", "Thinking im Chat"]];
 
 export async function render(target) {
-  const [diag, current] = await Promise.all([get("/api/diagnostics"), get("/api/settings")]);
+  const [diag, current, depots] = await Promise.all([get("/api/diagnostics"), get("/api/settings"), depotPanel()]);
   const inputs = {};
   const message = el("div");
   const formRows = FIELDS.map(([key, label]) => {
@@ -42,6 +87,7 @@ export async function render(target) {
       panel("Einstellungen", kv(formRows),
         diag.models.length ? "" : el("p", { class: "muted small" }, "Ollama ist nicht erreichbar: das Modell kann nur von Hand eingetragen werden."),
         el("div", { class: "head", style: "margin-top:10px" }, el("button", { class: "primary", onclick: save }, "Speichern")), message),
+      el("div", { class: "span-2" }, depots),
       el("div", { class: "span-2" }, panel("Tool-Klassifikation (tool_policy.py)", el("div", { class: "table-wrap" }, el("table", {},
         el("thead", {}, el("tr", {}, ["Tool", "Klasse", "Web"].map((h) => el("th", {}, h)))),
         el("tbody", {}, diag.tools.map(([name, cls, allowed]) => el("tr", {}, el("td", {}, name), el("td", {}, cls), el("td", { class: allowed === "erlaubt" ? "up" : "down" }, allowed))))))))));

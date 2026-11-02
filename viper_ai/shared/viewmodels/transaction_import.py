@@ -57,14 +57,15 @@ class ImportView:
 
 
 def request_arguments(path: str, format_text: str, create_securities: bool, include_historical: bool, strategies: Optional[dict[str, str]] = None,
-                      aliases: Optional[dict[str, str]] = None, removals: Optional[list[Any]] = None) -> dict[str, Any]:
+                      aliases: Optional[dict[str, str]] = None, removals: Optional[list[Any]] = None, portfolio_id: Optional[int] = None) -> dict[str, Any]:
     """Exactly what the user chose; nothing is filled in.  ``strategies`` maps a strategy key to ``swing`` / ``long_term`` / ``none`` (``none`` is not sent: the position simply
     stays without a strategy), ``aliases`` maps a Parqet identifier to the security key, ``removals`` lists the transaction ids the export no longer contains that the user
-    chose to remove.  No campaign is ever started by the page (``start_campaigns`` false)."""
+    chose to remove.  ``portfolio_id`` is the target depot chosen on the page (``None``: the default depot).  No campaign is ever started by the page
+    (``start_campaigns`` false)."""
     return {"file_path": path.strip(), "format": FORMATS.get(format_text, "parqet"), "create_securities": bool(create_securities), "include_historical": bool(include_historical),
             "strategies": [f"{key}={value}" for key, value in sorted((strategies or {}).items()) if value in ("swing", "long_term")],
             "accept_aliases": [f"{identifier}={security}" for identifier, security in sorted((aliases or {}).items())], "start_campaigns": False,
-            "remove_transactions": sorted({int(item) for item in (removals or [])})}
+            "remove_transactions": sorted({int(item) for item in (removals or [])}), "portfolio_id": None if portfolio_id in (None, "") else int(portfolio_id)}
 
 
 def _num(value: Any, digits: int = 2) -> str:
@@ -182,5 +183,7 @@ def build(res_ok: bool, data: Any, message: str = "") -> ImportView:
         view.headline = "Zuordnung abgelehnt – bitte die Auswahl ändern. " + view.headline
     if view.open_items and view.level == "info":
         view.level = "warning"
+    if isinstance(data.get("portfolio"), dict):  # the target depot: duplicates and positions are judged within it
+        view.headline = f"Depot {data['portfolio'].get('name')}: " + view.headline
     view.tooltip = "Prüfen schreibt nichts: Der Import wird auf einer Kopie im Speicher simuliert."
     return view

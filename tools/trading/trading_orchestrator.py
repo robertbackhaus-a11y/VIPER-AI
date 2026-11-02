@@ -58,7 +58,8 @@ class OrchestratorResult:
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+    """A table, or a view in its place (``positions`` is a view over ``portfolio_position`` once there are several portfolios)."""
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name=?", (name,)).fetchone() is not None
 
 
 def _active_swing_zero_positions(conn: sqlite3.Connection, evaluation_as_of: str) -> list[int]:

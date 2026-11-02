@@ -147,12 +147,13 @@ def _excluded(entry: UniverseEntry, known_id: Optional[int], *reasons: str) -> d
 
 
 def _ephemeral_connection(prod: sqlite3.Connection) -> sqlite3.Connection:
-    """In-memory copy of the production *schema* plus the FX/reference rows (production is only read)."""
+    """In-memory copy of the production *schema* plus the FX/reference rows (production is only read).  Views are copied too: ``positions``
+    is a view over ``portfolio_position`` once there are several portfolios."""
     mem = sqlite3.connect(":memory:")
     mem.row_factory = sqlite3.Row
     for (sql,) in prod.execute(
-        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND type IN ('table', 'index') "
-        "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name"
+        "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'view') "
+        "ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name"
     ).fetchall():
         mem.execute(sql)
     present = {row[0] for row in prod.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

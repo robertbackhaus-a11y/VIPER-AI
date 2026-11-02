@@ -19,6 +19,9 @@
   (one thread per case; no database of its own), so a
   case interrupted by a crash or a failed LLM call continues with :func:`resume` from its last finished step.  The step protocol is written to
   ``analysis_step`` as each node starts and finishes; the result to ``analysis_case``.
+* Portfolio context: a case is analysed in one context (``analysis_case.portfolio_id``: one depot, or NULL = the total of all active depots).
+  Every deterministic input is read through ``portfolio_scope.scope`` in that context, so position, weight and risk are those of the depot (or
+  of the whole holding); prices, news and fundamentals are global.
 * Re-evaluation: the case stores a fingerprint of its inputs; :func:`staleness` says what changed since (new prices, news, events, position,
   engine action, expired validity), and :func:`run_analysis` with ``supersedes_id`` starts the follow-up case.  There is no permanent loop.
 """
@@ -36,6 +39,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, Iterator, Optional, TypedDict
 
 import analysis_store
+import portfolio_scope
 
 LLM = Callable[[str, str], str]  # (system prompt, user prompt) -> JSON text
 
@@ -76,6 +80,7 @@ def _distinct_news(evidence: dict) -> dict:
 class State(TypedDict, total=False):
     case_id: int
     security_id: int
+    portfolio_id: Optional[int]
     question: str
     as_of: Optional[str]
     db_path: str
@@ -103,10 +108,16 @@ def _round(value: Any, digits: int = 2) -> Any:
     return round(n, digits) if n is not None else value
 
 
-def readonly(db_path: str) -> sqlite3.Connection:
+def readonly(db_path: str, portfolio_id: Optional[int] = None) -> sqlite3.Connection:
+    """A read-only connection in the portfolio context ``portfolio_id`` (``None`` = the total)."""
     conn = sqlite3.connect(f"file:///{Path(db_path).resolve().as_posix()}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
+    try:
+        portfolio_scope.scope(conn, portfolio_id)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -201,6 +212,7 @@ def gather(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] = No
         "position": None if position is None else {k: _round(position.get(k)) for k in ("quantity", "market_value_eur", "cost_basis_eur", "unrealized_pct", "weight_pct",
                                                                                          "day_change_pct", "strategy")},
         "held": position is not None,
+        "portfolio_context": portfolio_scope.label(conn, portfolio_scope.current(conn)),
         "portfolio": {k: _round(holdings["totals"].get(k)) for k in ("market_value_eur", "cash_eur", "swing_weight_pct", "long_term_weight_pct")},
         "sector": sector,
         "news": [{"id": n["id"], "date": str(n["published_at"])[:10], "title": n["title"], "publisher": n["publisher"], "material": bool(n["is_material"])} for n in news],
@@ -290,7 +302,7 @@ def build_graph(llm: LLM, checkpointer=None):
         return run
 
     def observe(state: State) -> dict:
-        conn = readonly(state["db_path"])
+        conn = readonly(state["db_path"], state.get("portfolio_id"))
         try:
             observation, evidence = gather(conn, state["security_id"], state.get("as_of"))
         finally:
@@ -329,7 +341,8 @@ def build_graph(llm: LLM, checkpointer=None):
         signalled = {e for item in qual["signals"] or [] for e in item["evidence"]}
         ids = [k for k in state["evidence"] if k != "portfolio:sector" and (not k.startswith(("news:", "event:")) or k in signalled)]
         sector = {k: v for k, v in state["evidence"].items() if k == "portfolio:sector"}
-        prompt = (f"Frage: {state['question']}\nWertpapier: {o['security']['symbol']} ({o['security']['name']}), gehalten: {'ja' if o['held'] else 'nein'}\n"
+        prompt = (f"Frage: {state['question']}\nWertpapier: {o['security']['symbol']} ({o['security']['name']}), gehalten: {'ja' if o['held'] else 'nein'}"
+                  f" (Depot-Kontext: {o.get('portfolio_context') or 'Gesamt'})\n"
                   "Aufgabe: These und Gegenthese mit Belegen; die Aktion wählt der nächste Schritt.\n"
                   f"Datenlage: {_dumps(state['data_quality'])}\nKennzahlen (deterministisch): {_dumps(state['quantitative'])}\n"
                   f"Meldungslage: {_dumps(qual)}\n" + (f"Sektor: {_dumps(sector)}\n" if sector else "")
@@ -362,7 +375,7 @@ def build_graph(llm: LLM, checkpointer=None):
 
     def risk_context(state: State) -> dict:
         o = state["observation"]
-        return {"risk": {"held": o["held"], "position": o["position"], "sector": o["sector"], "portfolio": o["portfolio"],
+        return {"risk": {"portfolio_context": o.get("portfolio_context"), "held": o["held"], "position": o["position"], "sector": o["sector"], "portfolio": o["portfolio"],
                          "engine_action": o["engine"]["action"], "engine_reasons": o["engine"]["reasons"], "plan_block_reason": o["engine"]["plan_block_reason"],
                          "volatility_60d_pct": o["technical"].get("volatility_60d_annualized_pct"), "drawdown_52w_pct": o["technical"].get("drawdown_52w_pct")}}
 
@@ -439,8 +452,9 @@ def _compiled(db_path: str, llm: LLM):
 def _finish(db_path: str, case_id: int, state: dict) -> dict:
     dq, review = state.get("data_quality") or {}, state.get("review")
     result = {k: state.get(k) for k in ("data_quality", "quantitative", "qualitative", "hypothesis", "evidence_check", "risk", "proposal", "review", "evidence", "log")}
-    result["observation"] = {k: (state.get("observation") or {}).get(k) for k in ("security", "as_of", "market_data_as_of", "held", "engine", "position", "sector", "news", "events")}
-    ro = readonly(db_path)
+    result["observation"] = {k: (state.get("observation") or {}).get(k) for k in ("security", "as_of", "market_data_as_of", "held", "portfolio_context", "engine", "position",
+                                                                                    "sector", "news", "events")}
+    ro = readonly(db_path, state.get("portfolio_id"))
     try:
         fp = fingerprint(ro, state["security_id"], state.get("observation") or {})
     finally:
@@ -469,22 +483,25 @@ def _execute(db_path: str, case_id: int, thread_id: str, llm: LLM, initial: Opti
 
 
 def start_case(db_path: str, security_id: int, *, question: str = "", model: str = "", as_of: Optional[str] = None, trigger: str = "manual",
-               supersedes_id: Optional[int] = None) -> int:
-    """Create the case row (status RUNNING) and answer its id; :func:`run_case` executes it."""
+               supersedes_id: Optional[int] = None, portfolio_id: Optional[int] = None) -> int:
+    """Create the case row (status RUNNING) and answer its id; :func:`run_case` executes it.  ``portfolio_id``: the portfolio context (``None`` =
+    the total of all active depots)."""
     with writable(db_path) as conn:
         if not analysis_store.available(conn):
             raise RuntimeError("Die Analyse-Tabellen fehlen: Migrate-TradingAnalysisCases.py --write ausführen")
         if conn.execute("SELECT 1 FROM security WHERE id = ?", (int(security_id),)).fetchone() is None:
             raise ValueError(f"security_id {security_id} not found")
+        portfolio_id = portfolio_scope.require_portfolio(conn, portfolio_id)
         return analysis_store.create_case(conn, security_id=int(security_id), question=question or "Wie ist die Investmentthese zu bewerten und was ist zu tun?",
                                           thread_id=f"viper-case-{uuid.uuid4().hex}", as_of=as_of or date.today().isoformat(), model=model, trigger=trigger,
-                                          supersedes_id=supersedes_id)
+                                          supersedes_id=supersedes_id, portfolio_id=portfolio_id)
 
 
 def run_case(db_path: str, case_id: int, llm: LLM) -> dict:
     with writable(db_path) as conn:
         case = analysis_store.get_case(conn, case_id)
-    return _execute(db_path, case_id, case["thread_id"], llm, {"case_id": case_id, "security_id": case["security_id"], "question": case["question"],
+    return _execute(db_path, case_id, case["thread_id"], llm, {"case_id": case_id, "security_id": case["security_id"], "portfolio_id": case.get("portfolio_id"),
+                                                                "question": case["question"],
                                                                 "as_of": None if case["as_of"] == date.today().isoformat() else case["as_of"], "db_path": str(db_path),
                                                                 "attempts": 0, "log": []})
 

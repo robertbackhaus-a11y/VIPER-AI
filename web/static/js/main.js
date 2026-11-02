@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Router of the single page: #/<page>[/<argument>] loads js/<module>.js and calls its render(target, argument).
 
-import { disposeCharts, el, failure, get, loading } from "./core.js";
+import { disposeCharts, el, failure, get, loading, portfolioId, setPortfolioId } from "./core.js";
 
 const ROUTES = {
   dashboard: "dashboard",
@@ -66,6 +66,24 @@ async function status() {
   }
 }
 
+// Depot switcher: Gesamt (all active depots) or one active depot; the choice lasts for this browser session and every page reads in it.
+async function depots() {
+  const box = document.getElementById("depot-box"), select = document.getElementById("depot");
+  try {
+    const data = await get("/api/portfolios");
+    const active = (data.portfolios || []).filter((p) => p.active);
+    if (!data.available || !active.length) { box.hidden = true; setPortfolioId(""); return; }
+    if (portfolioId() && !active.some((p) => String(p.id) === portfolioId())) setPortfolioId(""); // deleted or deactivated: back to the total
+    select.replaceChildren(el("option", { value: "" }, data.total_label || "Gesamt"), ...active.map((p) => el("option", { value: String(p.id) }, p.name)));
+    select.value = portfolioId();
+    box.hidden = false;
+  } catch (error) {
+    box.hidden = true;
+  }
+}
+document.getElementById("depot").addEventListener("change", (event) => { setPortfolioId(event.target.value); route(); });
+window.addEventListener("viper:depots", depots); // the depot management of the settings page changed the list
+
 const storedCollapsed = () => { try { return localStorage.getItem(NAV_KEY) === "1"; } catch { return false; } };
 document.body.classList.toggle("nav-collapsed", storedCollapsed());
 document.getElementById("menu").addEventListener("click", () => {
@@ -75,6 +93,6 @@ document.getElementById("menu").addEventListener("click", () => {
 });
 window.addEventListener("viper:status", status); // the settings page asks for a new check after saving
 window.addEventListener("hashchange", route);
-route();
+depots().finally(route);
 status();
 setInterval(status, 300000);

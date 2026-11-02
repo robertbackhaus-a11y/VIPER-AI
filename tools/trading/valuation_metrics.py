@@ -219,14 +219,17 @@ def shares_conflict(row: Optional[sqlite3.Row]) -> Optional[str]:
 
     A cover-page count can be one share class only (multi-class 20-F filers).  The row's own net income / EPS gives the share count its earnings
     were divided by; a stored count off by more than a factor of 2 is not this company's share count.  The implied count only rejects, it is never used.
+    Diluted EPS is preferred; basic EPS takes over when the diluted one implies no positive count (a diluted loss from adding back a convertible's
+    fair-value gain next to a basic profit).
     """
-    if row is None:
+    if row is None or row["net_income"] is None:
         return None
-    eps = row["eps_diluted"] if row["eps_diluted"] is not None else row["eps_basic"]
-    if eps is None or row["net_income"] is None or abs(float(eps)) < SHARES_CHECK_MIN_EPS:
-        return None
-    implied = float(row["net_income"]) / float(eps)
-    if implied <= 0:
+    implied = None
+    for eps in (row["eps_diluted"], row["eps_basic"]):
+        if eps is not None and abs(float(eps)) >= SHARES_CHECK_MIN_EPS and float(row["net_income"]) / float(eps) > 0:
+            implied = float(row["net_income"]) / float(eps)
+            break
+    if implied is None:
         return None
     factor = float(row["shares_outstanding"]) / implied
     if 0.5 <= factor <= 2.0:

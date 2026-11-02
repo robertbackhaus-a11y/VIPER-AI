@@ -55,11 +55,13 @@ Flags:
         hand-validated reference rows above, since they share the same
         "Company IR" source_id and unique key that this tool writes to.
         A period whose stored values already match the candidate is
-        always written (harmless refresh), --force or not. A candidate
+        always written (harmless refresh, keeping the row's fetch time),
+        --force or not. A candidate
         that only adds values to empty fields of a stored period (e.g.
         shares_outstanding) and agrees with every stored value fills
         those fields into the stored row and its source; a filled
-        shares_outstanding must pass the net income / EPS check.
+        shares_outstanding must pass the net income / EPS check. Run
+        again, such a candidate has nothing left to fill and is skipped.
 
 This is the single, canonical fundamentals-research tool for this project.
 """
@@ -542,8 +544,12 @@ def decide_write_action(period, existing_rows, write_enabled, force):
     if match is None:
         return {"action": "WRITE", "reason": "new period"}
     if values_equal(match, period):
-        return {"action": "WRITE", "reason": "refresh (unchanged)"}
+        # unchanged values stay visible since their first fetch (point in time)
+        return {"action": "WRITE", "reason": "refresh (unchanged)", "fetched_at": match.get("fetched_at")}
     added = None if force else fill_fields(match, period)
+    if added == {}:
+        # a fill answer run again: every value it has is stored already
+        return {"action": "SKIP", "reason": "already stored (nothing to fill)"}
     if added:
         # Only empty fields are filled, into the stored row and its source: a hand-validated value is never changed.
         merged = {**match, **{f: (match.get(f) if match.get(f) is not None else added.get(f)) for f in FIELDS}}
@@ -654,14 +660,15 @@ def format_amount(value):
 
 
 def print_dry_run(security, accepted, existing, decisions):
-    by_period_end = {p["period_end"]: d for p, d in zip(accepted, decisions)}
+    # keyed by end and type: a quarter and a half-year can end on the same day
+    by_period = {(p["period_end"], p["period_type"]): d for p, d in zip(accepted, decisions)}
 
     print()
     print(security["name"])
     print()
     print(f"{'Period':<12} {'Type':<12} {'Revenue':>12} {'EBIT':>12} {'Net Income':>12}  Action")
     for p in sorted(accepted, key=lambda x: x["period_end"]):
-        d = by_period_end[p["period_end"]]
+        d = by_period[(p["period_end"], p["period_type"])]
         print(
             f"{p['period_end']:<12} {p['period_type']:<12} "
             f"{format_amount(p.get('revenue')):>12} {format_amount(p.get('ebit')):>12} "
@@ -693,7 +700,7 @@ def print_dry_run(security, accepted, existing, decisions):
             )
             if match is None:
                 continue
-            d = by_period_end[row["period_end"]]
+            d = by_period[(row["period_end"], row["period_type"])]
             label = "MATCH" if not d.get("diff") else "DIFF"
             print(f"  {label} {row['period_end']} ({row['period_type']}) -> {d['action']}")
     print()
@@ -753,11 +760,14 @@ def main():
 
         to_write = [(p, d) for p, d in zip(accepted, decisions) if d["action"] == "WRITE"]
         skipped_failed = sum(1 for d in decisions if d["action"] == "SKIP" and d["reason"] == "failed validation")
-        skipped_conflict = sum(1 for d in decisions if d["action"] == "SKIP" and d["reason"] != "failed validation")
+        skipped_conflict = sum(1 for d in decisions if d["action"] == "SKIP" and "diff" in d)
+        skipped_other = sum(1 for d in decisions if d["action"] == "SKIP" and d["reason"] != "failed validation" and "diff" not in d)
         if skipped_failed:
             print(f"Skipping {skipped_failed} period(s) that failed validation.")
         if skipped_conflict:
             print(f"Skipping {skipped_conflict} period(s) that already exist with different values (use --force to overwrite).")
+        if skipped_other:
+            print(f"Skipping {skipped_other} period(s) with nothing to write or a rejected fill (see the table above).")
 
         company_ir_id = get_source_id(conn, "Company IR")
         web_id = get_source_id(conn, "Web")
@@ -770,7 +780,7 @@ def main():
                     upsert_fundamental(conn, d["row"]["source_id"], args.security_id, d["row"])
                     continue
                 source_id = company_ir_id if p["_all_primary"] else web_id
-                upsert_fundamental(conn, source_id, args.security_id, p)
+                upsert_fundamental(conn, source_id, args.security_id, {**p, "fetched_at": d.get("fetched_at")})
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

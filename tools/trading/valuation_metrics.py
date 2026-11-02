@@ -9,23 +9,34 @@ source, written by ``Refresh-TradingValuationMetrics.py``; ``analysis_engine`` r
 
 Inputs (all point-in-time for the price date, with the same visibility rule as the fundamentals module of ``analysis_engine``):
 
-* price: the latest ``market_data`` close on or before the date, in the security's trading currency;
+* price: the latest ``market_data`` close on or before the date, in the security's trading currency; a provider quote unit such as ``GBp`` (pence) is turned into
+  its ISO currency with ``fx_resolver.normalize_quote_unit``.  Market cap = price x shares outstanding, in the price currency;
 * TTM flows (revenue, net income, EBITDA, free cash flow): a stored ``ttm`` row if there is one, else the latest annual row bridged to the latest interim period of
   the next fiscal year, ``TTM = FY + YTD(current) - YTD(prior year)``, from rows of the same source and currency.  A YTD is a ``semiannual``/``nine_month`` row or the
   sum of the discrete quarters 1..n; a missing quarter leaves that flow empty, it is never filled in;
-* balance sheet (equity, cash, debt) and shares outstanding: the latest visible fundamentals row of that source.
+* balance sheet (equity, cash, debt): the latest visible fundamentals row of that source;
+* shares outstanding: the newest count of that source not older than the TTM anchor, else the newest such count of another source of the same company (for
+  example an IR row when the TTM comes from SEC).  The count must pass ``shares_conflict``, and a depositary receipt (ADR/ADS) never takes a filed count: the
+  filing counts underlying shares and the depositary ratio is not in the data.
 
-A multiple is left empty, with its reason, when an input is missing, the denominator is not positive (no P/E from a loss, no EV multiple from a negative EV) or
-the price and the fundamentals are in different currencies.  An empty multiple never drops the others.
+Fundamentals in another currency than the price are converted into the price currency with the stored ECB rate of ``fx_resolver.resolve_fx_rate`` (direct EUR
+pairs, no cross rates): balance-sheet values at the balance-sheet period end, TTM flows at the TTM period end.  Without a usable rate on that date the values of
+that group stay empty, and so do the multiples that need them; nothing is estimated.
+
+A multiple is left empty, with its reason, when an input is missing or the denominator is not positive (no P/E from a loss, no EV multiple from a negative EV).
+An empty multiple never drops the others.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
+
+import fx_resolver
 
 SOURCE_NAME = "VIPER_CALCULATED"
 SOURCE_TYPE = "calculated"
@@ -213,6 +224,33 @@ def shares_conflict(row: Optional[sqlite3.Row]) -> Optional[str]:
     return f"{float(row['shares_outstanding']):,.0f} on {row['period_end']} is inconsistent with net_income/eps ({implied:,.0f})"
 
 
+def depositary_receipt(security: Optional[sqlite3.Row]) -> bool:
+    """True for an ADR/ADS/GDR listing: named so, or a US ISIN of an issuer from another country."""
+    if security is None:
+        return False
+    if re.search(r"\b(ADR|ADS|GDR)\b|DEPOSITARY", (security["name"] or "").upper()):
+        return True
+    country = (security["country"] or "").upper()
+    return (security["isin"] or "").upper().startswith("US") and country not in ("", "US")
+
+
+def _converted(conn: sqlite3.Connection, values: dict[str, Optional[float]], from_currency: str, to_currency: str, on: Optional[str],
+               label: str, notes: list[str]) -> dict[str, Optional[float]]:
+    """``values`` in ``to_currency`` at the stored ECB rate on ``on``; all None, with the reason in ``notes``, without a usable rate."""
+    if all(v is None for v in values.values()):
+        return values
+    if not on:
+        notes.append(f"fx: {label} in {from_currency} has no date for a {from_currency}->{to_currency} rate; not converted")
+        return {k: None for k in values}
+    fx = fx_resolver.resolve_fx_rate(conn, from_currency, to_currency, on[:10])
+    if fx.conversion_factor is None:
+        why = "; ".join(fx.quality.details) or fx.quality.status.value
+        notes.append(f"fx: {label} in {from_currency}, no usable {from_currency}->{to_currency} rate on {on[:10]} ({why}); not converted")
+        return {k: None for k in values}
+    notes.append(f"fx_converted: {label} {from_currency}->{to_currency} x{fx.conversion_factor:.6g} ({fx.source} {fx.rate_date})")
+    return {k: (None if v is None else float(v) * fx.conversion_factor) for k, v in values.items()}
+
+
 def _latest_price(conn: sqlite3.Connection, security_id: int, as_of: str) -> Optional[sqlite3.Row]:
     return conn.execute(
         "SELECT md.trade_date, md.close, COALESCE(md.currency, s.currency) AS currency FROM market_data md JOIN security s ON s.id = md.security_id "
@@ -234,8 +272,10 @@ def calculate(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] =
         if not rows:
             return None
         flows, ttm_end, method, anchor = ttm_flows(rows)
-        row = ValuationRow(security_id=int(security_id), as_of_date=price_date, price=float(price["close"]),
-                           price_currency=(price["currency"] or "").upper() or None)
+        # GBp (pence) -> GBP x0.01: a quote unit, not an FX conversion.
+        price_currency, price_factor = fx_resolver.normalize_quote_unit(price["currency"])
+        row = ValuationRow(security_id=int(security_id), as_of_date=price_date, price=float(price["close"]) * price_factor,
+                           price_currency=price_currency or (price["currency"] or "").upper() or None)
         notes: list[str] = []
         if anchor is None:
             notes.append("ttm: no annual fundamentals row")
@@ -255,22 +295,30 @@ def calculate(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] =
             fcf = flows["operating_cash_flow"] - abs(flows["capex"])
         row.free_cash_flow_ttm = fcf
         row.total_equity, row.cash, row.total_debt = balance["total_equity"], balance["cash"], balance["total_debt"]
-        # Shares: the balance-sheet row, else the newest count of the same source not older than the TTM anchor.
-        shares_row = next((r for r in source_rows if r["shares_outstanding"] is not None
-                           and (anchor is None or r["period_end"] >= anchor["period_end"])), None)
+        # Shares: the newest count of the same source not older than the TTM anchor, else the newest such count of another source.
+        def newest_count(candidates: list[sqlite3.Row]) -> Optional[sqlite3.Row]:
+            return next((r for r in candidates if r["shares_outstanding"] is not None
+                         and (anchor is None or r["period_end"] >= anchor["period_end"])), None)
+        shares_row = newest_count(source_rows) or newest_count(rows)
         row.shares_outstanding = None if shares_row is None else float(shares_row["shares_outstanding"])
         conflict = shares_conflict(shares_row)
         if conflict:
             notes.append(f"shares_outstanding: {conflict}")
             row.shares_outstanding = None
+        security = conn.execute("SELECT name, isin, country FROM security WHERE id = ?", (int(security_id),)).fetchone()
+        if row.shares_outstanding is not None and depositary_receipt(security):
+            notes.append("shares_outstanding: the listing is a depositary receipt and the filed count is in underlying shares (ratio not in the data)")
+            row.shares_outstanding = None
         if row.currency and row.price_currency and row.currency != row.price_currency:
-            # No FX conversion here: a listing in another currency than the filing (ADRs, 20-F filers) can also differ in the share unit.
-            notes.append(f"currency: price in {row.price_currency}, fundamentals in {row.currency}; no price-based multiple")
-            row.price = None
-            apply_multiples(row)
-            row.price = float(price["close"])
-        else:
-            apply_multiples(row)
+            # Market cap stays price x shares in the price currency; the fundamentals follow it, each group at the rate of its own date.
+            balance_values = _converted(conn, {"total_equity": row.total_equity, "cash": row.cash, "total_debt": row.total_debt}, row.currency,
+                                        row.price_currency, row.balance_sheet_period_end, "balance sheet", notes)
+            flow_values = _converted(conn, {"revenue_ttm": row.revenue_ttm, "net_income_ttm": row.net_income_ttm, "ebitda_ttm": row.ebitda_ttm,
+                                            "free_cash_flow_ttm": row.free_cash_flow_ttm}, row.currency, row.price_currency, row.ttm_period_end, "TTM", notes)
+            for name, value in {**balance_values, **flow_values}.items():
+                setattr(row, name, value)
+            row.currency = row.price_currency
+        apply_multiples(row)
         row.missing = notes + row.missing
         return row
     finally:

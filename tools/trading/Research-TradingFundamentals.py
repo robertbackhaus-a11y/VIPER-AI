@@ -223,6 +223,11 @@ number over an available primary one.
 - cash: "Cash and cash equivalents" specifically -- do not fold in other
   short-term investments unless the source itself classifies them as cash
   equivalents.
+- shares_outstanding: the number of ordinary shares outstanding at the
+  period end (issued minus treasury shares), as the report itself states
+  it; with several ordinary share classes, the total of all of them. Never
+  the weighted-average count of the EPS note, never net income / EPS. If
+  the report does not state it: null.
 - Never treat a cumulative year-to-date figure (H1, 9M, FY) as a standalone
   quarter. A derivation like "Q2 = H1_cumulative - Q1_cumulative" is only
   allowed when both operands are complete, use the same IFRS/GAAP

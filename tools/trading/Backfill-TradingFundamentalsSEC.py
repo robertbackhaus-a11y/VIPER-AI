@@ -198,8 +198,8 @@ US_GAAP = {
     ],
 
     # Balance-sheet share count at the period end. The DEI cover-page
-    # count (DEI_SHARES) is dated at the filing's cover date, which is
-    # never a period end, so on its own it never reaches a stored row.
+    # count (DEI_SHARES) is dated at the filing's cover date; it fills a
+    # period without this count (see attach_cover_counts).
     "shares_outstanding": [
         "CommonStockSharesOutstanding",
     ],
@@ -1348,6 +1348,63 @@ def extract_shares(
     )
 
 
+def attach_cover_counts(
+    records: dict,
+    shares_periods: dict,
+) -> dict:
+    """Move each cover-page share count to the period of its own filing.
+
+    A 10-Q/10-K cover count is dated at the cover date, a few weeks after
+    the period end, so its own key never matches a period. It belongs to
+    the period of the same filing: the newest period of the same type
+    (quarterly for a 10-Q, annual for a 10-K) that ends before the cover
+    date and was filed on the same day. A balance-sheet count
+    (CommonStockSharesOutstanding) of that period wins. A 20-F cover
+    count is dated at the fiscal year end and keeps its own key.
+    """
+
+    attached = {}
+
+    for key, fact in shares_periods.items():
+
+        if key in records:
+
+            attached[key] = fact
+
+            continue
+
+        end, ptype = key
+
+        filed = fact["item"].get(
+            "filed"
+        )
+
+        same_filing = [
+            candidate
+            for candidate, record in records.items()
+            if candidate[1] == ptype
+            and candidate[0] < end
+            and filed
+            and record["filing_date"] == filed
+        ]
+
+        if not same_filing:
+            continue
+
+        target = max(
+            same_filing
+        )
+
+        if (
+            records[target]["shares_outstanding"] is None
+            and target not in shares_periods
+        ):
+
+            attached[target] = fact
+
+    return attached
+
+
 # ============================================================
 # BUILD FUNDAMENTALS
 # ============================================================
@@ -1426,7 +1483,10 @@ def build_records(
     merge_metric(
         records,
         "shares_outstanding",
-        shares_periods,
+        attach_cover_counts(
+            records,
+            shares_periods,
+        ),
     )
 
     # --------------------------------------------------------

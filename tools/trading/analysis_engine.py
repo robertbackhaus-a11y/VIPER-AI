@@ -334,7 +334,7 @@ def _build_valuation(
     # decide this quality.  Every multiple that could not be calculated keeps the module PARTIAL with its reason.
     missing = tuple(
         reason for reason in json.loads(row["missing"] or "[]")
-        if reason.split(":", 1)[0] in valuation_metrics.MULTIPLES or reason.split(":", 1)[0] in ("market_cap", "currency")
+        if reason.split(":", 1)[0] in valuation_metrics.MULTIPLES or reason.split(":", 1)[0] in ("market_cap", "currency", "fx")
     )
     present = [name for name in valuation_metrics.MULTIPLES if row[name] is not None]
     status = AvailabilityStatus.AVAILABLE if len(present) == len(valuation_metrics.MULTIPLES) else AvailabilityStatus.PARTIAL

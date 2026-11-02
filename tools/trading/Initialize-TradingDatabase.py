@@ -576,6 +576,52 @@ ON price_targets(security_id, as_of_date DESC);
 
 
 -- ============================================================
+-- 13b. VALUATION METRICS
+-- Multiples aus eigenen Kursen und Fundamentals berechnet
+-- (Quelle VIPER_CALCULATED), keine Schätzungen.
+-- Siehe valuation_metrics.py / Migrate-TradingValuationMetrics.py.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS valuation_metrics (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    security_id                 INTEGER NOT NULL,
+    as_of_date                  TEXT NOT NULL,
+    price                       REAL,
+    price_currency              TEXT,
+    currency                    TEXT,
+    ttm_period_end              TEXT,
+    ttm_method                  TEXT,
+    balance_sheet_period_end    TEXT,
+    shares_outstanding          REAL,
+    revenue_ttm                 REAL,
+    net_income_ttm              REAL,
+    ebitda_ttm                  REAL,
+    free_cash_flow_ttm          REAL,
+    total_equity                REAL,
+    cash                        REAL,
+    total_debt                  REAL,
+    market_cap                  REAL,
+    enterprise_value            REAL,
+    pe_ttm                      REAL,
+    ps_ttm                      REAL,
+    pb                          REAL,
+    ev_revenue                  REAL,
+    ev_ebitda                   REAL,
+    p_fcf                       REAL,
+    fcf_yield_pct               REAL,
+    missing                     TEXT,
+    source_id                   INTEGER NOT NULL,
+    calculated_at               TEXT NOT NULL,
+    FOREIGN KEY (security_id) REFERENCES security(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_id) REFERENCES data_sources(id),
+    UNIQUE (security_id, as_of_date, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_valuation_metrics_security_date
+ON valuation_metrics(security_id, as_of_date DESC);
+
+
+-- ============================================================
 -- 14. EVENTS
 -- Dauerhafte kursrelevante Ereignisse.
 -- ============================================================
@@ -1012,6 +1058,9 @@ INSERT OR IGNORE INTO metadata(key, value)
 VALUES ('swing_campaign_schema_version', '1');
 
 INSERT OR IGNORE INTO metadata(key, value)
+VALUES ('valuation_metrics_schema_version', '1');
+
+INSERT OR IGNORE INTO metadata(key, value)
 VALUES ('database_type', 'swing_trading');
 
 INSERT OR IGNORE INTO metadata(key, value)
@@ -1026,6 +1075,7 @@ DEFAULT_SOURCES = [
     ("Company IR", "primary", None),
     ("Exchange", "primary", None),
     ("Web", "web", None),
+    ("VIPER_CALCULATED", "calculated", None),
 ]
 
 

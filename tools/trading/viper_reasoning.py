@@ -196,6 +196,7 @@ def gather(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] = No
         "SELECT id, event_date, event_type, title FROM events WHERE security_id = ? AND substr(event_date, 1, 10) BETWEEN ? AND ? ORDER BY event_date DESC LIMIT ?",
         (int(security_id), (date.fromisoformat(evaluation) - timedelta(days=EVENT_DAYS)).isoformat(), evaluation, EVENT_LIMIT))]
     tech, fund, pos = snapshot.get("technical") or {}, snapshot.get("fundamental") or {}, snapshot.get("position") or {}
+    val = snapshot.get("valuation") or {}
     decision = (record or {}).get("decision") or {}
     observation = {
         "security": dict(sec), "as_of": evaluation, "market_data_as_of": (tech.get("quality") or {}).get("as_of"),
@@ -204,6 +205,9 @@ def gather(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] = No
                                                         "drawdown_52w_pct", "volatility_60d_annualized_pct", "momentum_score", "data_points")},
         "fundamental": {k: _round(fund.get(k)) for k in ("period_end", "period_type", "currency", "revenue_yoy_growth_pct", "net_income_yoy_growth_pct",
                                                           "operating_margin_pct", "fcf_margin_pct")},
+        # Multiples calculated from VIPER's own prices and fundamentals (source VIPER_CALCULATED), not analyst estimates; empty when an input is missing.
+        "valuation": {k: _round(val.get(k)) for k in ("source", "metrics_as_of", "currency", "ttm_period_end", "market_cap", "enterprise_value", "pe_ttm", "ps_ttm",
+                                                       "pb", "ev_revenue", "ev_ebitda", "p_fcf", "fcf_yield_pct")},
         "engine": {"action": decision.get("action"), "confidence": decision.get("confidence"), "action_quantity": decision.get("action_quantity"),
                    "reasons": decision.get("reasons") or [], "risks": decision.get("risks") or [], "blocking_data_gaps": decision.get("blocking_data_gaps") or [],
                    "stop": _round(decision.get("stop")), "tp1": _round(decision.get("tp1")), "tp2": _round(decision.get("tp2")),
@@ -225,6 +229,9 @@ def gather(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] = No
     for key, value in observation["fundamental"].items():
         if value is not None:
             evidence[f"fundamental:{key}"] = f"{key} = {value}"
+    for key, value in observation["valuation"].items():
+        if value is not None and key not in ("source", "metrics_as_of", "currency", "ttm_period_end"):
+            evidence[f"valuation:{key}"] = f"{key} = {value} ({observation['valuation']['source']}, Kurs {observation['valuation']['metrics_as_of']}, TTM bis {observation['valuation']['ttm_period_end']})"
     engine = observation["engine"]
     if engine["action"]:
         evidence["engine:action"] = f"Engine-Aktion {engine['action']} (Gründe: {', '.join(engine['reasons']) or '—'})"
@@ -319,7 +326,8 @@ def build_graph(llm: LLM, checkpointer=None):
 
     def quantitative(state: State) -> dict:
         o = state["observation"]
-        return {"quantitative": {"technical": o["technical"], "fundamental": o["fundamental"], "engine": o["engine"], "position": o["position"]}}
+        return {"quantitative": {"technical": o["technical"], "fundamental": o["fundamental"], "valuation": o.get("valuation") or {}, "engine": o["engine"],
+                                 "position": o["position"]}}
 
     def qualitative(state: State) -> dict:
         o = state["observation"]
@@ -335,7 +343,7 @@ def build_graph(llm: LLM, checkpointer=None):
     def hypothesis(state: State) -> dict:
         o = state["observation"]
         feedback = (state.get("evidence_check") or {}).get("problems") or []
-        # The values of metric:*, fundamental:*, engine:* and portfolio:position are in the figures, the news content in the qualitative result:
+        # The values of metric:*, fundamental:*, valuation:*, engine:* and portfolio:position are in the figures, the news content in the qualitative result:
         # the model gets their ids, not the same data a second time.  The evidence check still uses the whole catalogue.
         qual = {"summary": state["qualitative"].get("summary"), "signals": state["qualitative"].get("signals")}
         signalled = {e for item in qual["signals"] or [] for e in item["evidence"]}

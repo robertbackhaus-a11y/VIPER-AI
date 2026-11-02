@@ -216,6 +216,8 @@ function evidenceToggle(title, items, catalogue) {
 // The data gaps of the engine ("fundamental: latest period missing free_cash_flow, ...") as readable sentences; one gap can give several.
 const FIELD = { revenue: "Umsatz", net_income: "Nettogewinn", operating_cash_flow: "Operating Cash Flow", free_cash_flow: "Free Cash Flow", cash: "Liquidität" };
 const SOURCE_ROWS = { estimates: "Schätzungen", ratings: "Ratings", price_targets: "Kursziele", events: "Ereignisse", news: "Meldungen" };
+const MULTIPLE = { pe_ttm: "KGV", ps_ttm: "KUV", pb: "KBV", ev_revenue: "EV/Umsatz", ev_ebitda: "EV/EBITDA", p_fcf: "P/FCF", fcf_yield_pct: "FCF-Rendite",
+  market_cap: "Marktkapitalisierung", currency: "Multiples (Kurs- und Bilanzwährung verschieden)" };
 const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(", ")} und ${items[items.length - 1]}` : items[0]);
 function gapTexts(gap) {
   const [area, ...restParts] = String(gap).split(": ");
@@ -225,6 +227,8 @@ function gapTexts(gap) {
   const fields = [...rest.matchAll(/latest period missing (\w+)/g)].map((m) => FIELD[m[1]] || m[1]);
   if (fields.length) out.push(`${name} unvollständig: ${listing(fields)} der letzten Periode ${fields.length > 1 ? "fehlen" : "fehlt"}`);
   if (/FUNDAMENTALS_PUBLICATION_DATE_UNVERIFIED/.test(rest)) out.push("Publikationsdatum der Fundamentaldaten konnte nicht verifiziert werden (Filing Date fehlt)");
+  const multiples = [...rest.matchAll(/(?:^|, )(pe_ttm|ps_ttm|pb|ev_revenue|ev_ebitda|p_fcf|fcf_yield_pct|market_cap|currency): /g)].map((m) => MULTIPLE[m[1]]);
+  if (multiples.length) out.push(`${name} unvollständig: ${listing(multiples)} nicht berechenbar (Eingaben fehlen)`);
   const rows = [...rest.matchAll(/no (\w+) rows/g)].map((m) => m[1]).filter((t) => t !== "source" && t !== "fundamentals");
   if (rows.length) out.push(`${name} unvollständig: keine ${listing(rows.map((t) => SOURCE_ROWS[t] || t))}`);
   if (out.length) return out;

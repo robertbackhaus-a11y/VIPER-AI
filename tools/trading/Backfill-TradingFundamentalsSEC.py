@@ -196,6 +196,13 @@ US_GAAP = {
         "ShortTermBorrowings",
         "ShortTermDebt",
     ],
+
+    # Balance-sheet share count at the period end. The DEI cover-page
+    # count (DEI_SHARES) is dated at the filing's cover date, which is
+    # never a period end, so on its own it never reaches a stored row.
+    "shares_outstanding": [
+        "CommonStockSharesOutstanding",
+    ],
 }
 
 
@@ -1259,8 +1266,11 @@ def merge_metric(
             "filed"
         )
 
+        # A share count can come from a later filing's comparative balance
+        # sheet; it must not move the publication date of the statement.
         if (
             filed
+            and metric != "shares_outstanding"
             and (
                 record["_latest_filed"] is None
                 or

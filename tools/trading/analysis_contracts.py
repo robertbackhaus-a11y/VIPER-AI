@@ -96,6 +96,20 @@ class ValuationAnalysis:
     estimates_count: int = 0
     ratings_count: int = 0
     price_targets_count: int = 0
+    # Multiples calculated from VIPER's own prices and fundamentals (valuation_metrics, source VIPER_CALCULATED); never estimates.
+    source: Optional[str] = None
+    metrics_as_of: Optional[str] = None
+    currency: Optional[str] = None
+    ttm_period_end: Optional[str] = None
+    market_cap: Optional[float] = None
+    enterprise_value: Optional[float] = None
+    pe_ttm: Optional[float] = None
+    ps_ttm: Optional[float] = None
+    pb: Optional[float] = None
+    ev_revenue: Optional[float] = None
+    ev_ebitda: Optional[float] = None
+    p_fcf: Optional[float] = None
+    fcf_yield_pct: Optional[float] = None
 
 
 @dataclass(frozen=True)

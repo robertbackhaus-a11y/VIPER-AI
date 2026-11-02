@@ -43,6 +43,7 @@ from portfolio_context import derive_allocation_guardrails
 from swing_lifecycle import derive_open_lifecycle
 import portfolio_scope
 import trading_analytics
+import valuation_metrics
 
 
 DB_PATH = runtime_paths.default_db_path()
@@ -308,6 +309,48 @@ def _module_quality(counts: dict[str, int], as_of: Optional[str]) -> DataQuality
         missing = tuple(f"no {name} rows" for name, count in counts.items() if count == 0)
         return DataQuality(AvailabilityStatus.PARTIAL, missing, as_of)
     return DataQuality(AvailabilityStatus.AVAILABLE, (), as_of)
+
+
+def _build_valuation(
+    conn: sqlite3.Connection,
+    security_id: int,
+    requested_as_of: Optional[str],
+    evaluation_as_of: str,
+) -> ValuationAnalysis:
+    counts = {
+        "estimates": _count_for_security(conn, "estimates", security_id, "as_of_date", requested_as_of),
+        "ratings": _count_for_security(conn, "ratings", security_id, "as_of_date", requested_as_of),
+        "price_targets": _count_for_security(conn, "price_targets", security_id, "as_of_date", requested_as_of),
+    }
+    analyst = {
+        "estimates_count": counts["estimates"],
+        "ratings_count": counts["ratings"],
+        "price_targets_count": counts["price_targets"],
+    }
+    row = valuation_metrics.latest(conn, security_id, evaluation_as_of)
+    if row is None:
+        return ValuationAnalysis(quality=_module_quality(counts, requested_as_of), **analyst)
+    # The calculated multiples are the valuation data; analyst estimates/ratings/price targets are a separate, later block and do not
+    # decide this quality.  Every multiple that could not be calculated keeps the module PARTIAL with its reason.
+    missing = tuple(
+        reason for reason in json.loads(row["missing"] or "[]")
+        if reason.split(":", 1)[0] in valuation_metrics.MULTIPLES or reason.split(":", 1)[0] in ("market_cap", "currency")
+    )
+    present = [name for name in valuation_metrics.MULTIPLES if row[name] is not None]
+    status = AvailabilityStatus.AVAILABLE if len(present) == len(valuation_metrics.MULTIPLES) else AvailabilityStatus.PARTIAL
+    if not present:
+        status = AvailabilityStatus.UNAVAILABLE
+    return ValuationAnalysis(
+        quality=DataQuality(status, missing if status is not AvailabilityStatus.AVAILABLE else (), row["as_of_date"]),
+        **analyst,
+        source=valuation_metrics.SOURCE_NAME,
+        metrics_as_of=row["as_of_date"],
+        currency=row["currency"],
+        ttm_period_end=row["ttm_period_end"],
+        market_cap=row["market_cap"],
+        enterprise_value=row["enterprise_value"],
+        **{name: row[name] for name in valuation_metrics.MULTIPLES},
+    )
 
 
 def _count_for_security(
@@ -741,17 +784,7 @@ def build_analysis_snapshot(
         fundamental = _build_fundamental(
             conn, security_id, requested_as_of, security["asset_type"], visible_as_of=evaluation_as_of
         )
-        valuation_counts = {
-            "estimates": _count_for_security(conn, "estimates", security_id, "as_of_date", requested_as_of),
-            "ratings": _count_for_security(conn, "ratings", security_id, "as_of_date", requested_as_of),
-            "price_targets": _count_for_security(conn, "price_targets", security_id, "as_of_date", requested_as_of),
-        }
-        valuation = ValuationAnalysis(
-            quality=_module_quality(valuation_counts, requested_as_of),
-            estimates_count=valuation_counts["estimates"],
-            ratings_count=valuation_counts["ratings"],
-            price_targets_count=valuation_counts["price_targets"],
-        )
+        valuation = _build_valuation(conn, security_id, requested_as_of, evaluation_as_of)
         event_counts = {
             "events": _count_for_security(conn, "events", security_id, "event_date", requested_as_of),
             "news": _count_for_security(conn, "news", security_id, "published_at", requested_as_of),

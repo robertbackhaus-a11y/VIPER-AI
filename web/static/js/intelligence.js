@@ -96,7 +96,7 @@ async function overview(target) {
   // Only the two tables are refreshed while an analysis runs; the start form keeps its selection and text.
   const fill = (d) => {
     thesesBox.replaceChildren(d.theses.length ? el("div", { class: "table-wrap" }, el("table", {},
-      el("thead", {}, el("tr", {}, ["Wertpapier", "Vorschlag", "Engine", "Konfidenz", "Datenstand", "Gültig bis", "Stand", ""].map((h) => el("th", {}, h)))),
+      el("thead", {}, el("tr", {}, ["Wertpapier", "Vorschlag", "Engine", "Entscheidungskonfidenz", "Datenstand", "Gültig bis", "Stand", ""].map((h) => el("th", {}, h)))),
       el("tbody", {}, d.theses.map((c) => el("tr", { class: c.stale.length ? "warning" : "" },
         el("td", {}, el("a", { href: `#/analysis/${c.id}` }, c.symbol || c.security_id), el("span", { class: "muted" }, ` ${c.name || ""}`)),
         el("td", {}, c.status === "DONE" ? actionText(c.action) : statusBadge(c)),
@@ -213,16 +213,30 @@ function evidenceToggle(title, items, catalogue) {
   return el("details", { class: "more" }, el("summary", {}, `${title} (${items.length}) · Belege anzeigen`),
     el("ul", { class: "evidence" }, items.map((i) => el("li", {}, richText(i.note || DASH, catalogue), " ", i.evidence.length ? refChip(i.evidence, catalogue) : null))));
 }
-// The data gaps of the engine ("fundamental: FUNDAMENTALS_PUBLICATION_DATE_UNVERIFIED: filing_date missing, ...") as readable text.
-function gapText(gap) {
+// The data gaps of the engine ("fundamental: latest period missing free_cash_flow, ...") as readable sentences; one gap can give several.
+const FIELD = { revenue: "Umsatz", net_income: "Nettogewinn", operating_cash_flow: "Operating Cash Flow", free_cash_flow: "Free Cash Flow", cash: "Liquidität" };
+const SOURCE_ROWS = { estimates: "Schätzungen", ratings: "Ratings", price_targets: "Kursziele", events: "Ereignisse", news: "Meldungen" };
+const listing = (items) => (items.length > 1 ? `${items.slice(0, -1).join(", ")} und ${items[items.length - 1]}` : items[0]);
+function gapTexts(gap) {
   const [area, ...restParts] = String(gap).split(": ");
   const rest = restParts.join(": ");
   const name = AREA[area] || area;
-  if (/FUNDAMENTALS_PUBLICATION_DATE_UNVERIFIED/.test(rest)) return "Publikationsdatum der Fundamentaldaten konnte nicht verifiziert werden (Filing Date fehlt)";
-  if (/no source rows|missing|unavailable/i.test(rest)) return `${name} fehlen`;
-  if (/stale/i.test(rest)) return `${name} veraltet`;
-  if (/partial/i.test(rest)) return `${name} unvollständig`;
-  return `${name}: ${rest || "eingeschränkt"}`;
+  const out = [];
+  const fields = [...rest.matchAll(/latest period missing (\w+)/g)].map((m) => FIELD[m[1]] || m[1]);
+  if (fields.length) out.push(`${name} unvollständig: ${listing(fields)} der letzten Periode ${fields.length > 1 ? "fehlen" : "fehlt"}`);
+  if (/FUNDAMENTALS_PUBLICATION_DATE_UNVERIFIED/.test(rest)) out.push("Publikationsdatum der Fundamentaldaten konnte nicht verifiziert werden (Filing Date fehlt)");
+  const rows = [...rest.matchAll(/no (\w+) rows/g)].map((m) => m[1]).filter((t) => t !== "source" && t !== "fundamentals");
+  if (rows.length) out.push(`${name} unvollständig: keine ${listing(rows.map((t) => SOURCE_ROWS[t] || t))}`);
+  if (out.length) return out;
+  // Older analyses: the engine named a converted foreign quote a gap; the conversion worked, so no reason is shown (the code stays listed).
+  if (rest === "position and market price currencies differ") return [];
+  if (/no fundamentals rows/.test(rest)) return ["Fundamentaldaten fehlen"];
+  if (/no source rows/.test(rest)) return [area === "valuation" ? "Keine Valuation-Datensätze verfügbar" : `Keine Datensätze für ${name} verfügbar`];
+  if (/no FX rate|FX rate is \d+ days old|invalid or missing currency|EUR-based FX pair/.test(rest)) return ["Kurs nicht in die Positionswährung umrechenbar (Wechselkurs fehlt, ist veraltet oder Währung unbekannt)"];
+  if (/missing|unavailable/i.test(rest)) return [`${name} fehlen`];
+  if (/stale/i.test(rest)) return [`${name} veraltet`];
+  if (/partial/i.test(rest)) return [`${name} unvollständig`];
+  return [`${name}: ${rest || "eingeschränkt"}`];
 }
 const technicalCodes = (codes) => (codes.length ? el("details", { class: "more small" }, el("summary", {}, "Technische Codes"), el("ul", { class: "small muted" }, codes.map((g) => el("li", {}, g)))) : null);
 
@@ -347,17 +361,18 @@ function resultBlocks(c) {
     blocks.push(el("div", { class: "kpis" },
       box("Vorschlag", actionText(c.action), "keine Order"),
       box("Engine", actionText(c.engine_action)),
-      box("Konfidenz", CONF_TEXT[c.confidence] || DASH),
+      box("Entscheidungskonfidenz", CONF_TEXT[c.confidence] || DASH),
       box("Datenlage", DQ_TEXT[dq.status] || dq.status || DASH, `Datenstand ${day(c.data_as_of)}`),
       box("Gültig bis", day(c.valid_until), "Neu bewerten bei wesentlichen Kurs-, Nachrichten- oder Fundamentaldatenänderungen")));
     blocks.push(c.engine_action ? el("div", { class: `agree ${review.agrees_with_engine ? "ok" : "warn"}` }, review.agrees_with_engine ? "✓ Engine und Analyse stimmen überein" : "⚠ Analyse weicht von der Engine ab")
       : el("div", { class: "agree muted" }, "Keine Engine-Aktion für dieses Wertpapier"));
   }
   if (dq.status && dq.status !== "SUFFICIENT") {
-    const reasons = engineGaps.map(gapText);
+    const reasons = engineGaps.flatMap(gapTexts);
     if (!dq.news) reasons.push("Keine Meldungen im Betrachtungszeitraum");
+    if (dq.status === "INSUFFICIENT") reasons.push("Ohne Kurs ist keine Bewertung möglich");
     blocks.push(el("div", { class: "note warning" }, el("strong", {}, dq.status === "INSUFFICIENT" ? "⚠ Datenlage unzureichend" : "⚠ Datenlage eingeschränkt"),
-      el("div", {}, reasons.length ? `${reasons.join(". ")}. ` : "", dq.status === "INSUFFICIENT" ? "Ohne Kurs ist keine Bewertung möglich." : "Bewertung mit eingeschränkter Datenqualität."),
+      reasons.length ? el("ul", { class: "evidence" }, reasons.map((t) => el("li", {}, `${t}.`))) : null,
       technicalCodes([`Datenlage ${dq.status}`, ...engineGaps])));
   }
   if (h.thesis || h.counter_thesis) {
@@ -385,14 +400,25 @@ function resultBlocks(c) {
   }
   if (h.thesis) {
     const ec = r.evidence_check;
+    // The model often repeats the engine codes ("fundamental: latest period missing ..."): those are shown as text once, under the codes.
+    const isCode = (g) => /^(\w+): /.test(g) && AREA[g.split(": ")[0]] !== undefined;
+    const modelCodes = (h.data_gaps || []).filter(isCode);
+    const gapList = [];
+    const seen = new Set();
+    const byArea = new Map();
+    for (const g of [...engineGaps, ...modelCodes]) {
+      const [area, ...rest] = g.split(": ");
+      byArea.set(area, new Set([...(byArea.get(area) || []), ...rest.join(": ").split(/, (?=latest period|no \w+ rows|FUNDAMENTALS_)/)]));
+    }
+    for (const t of [...byArea].flatMap(([area, details]) => gapTexts(`${area}: ${[...details].join(", ")}`))) if (!seen.has(t)) { seen.add(t); gapList.push({ text: t, code: true }); }
+    for (const g of h.data_gaps || []) if (!isCode(g)) gapList.push({ text: g, code: false });
     blocks.push(el("div", { class: "grid cols-3", style: "margin-top:16px" },
       panel("Annahmen", (h.assumptions || []).length ? el("ul", { class: "evidence" }, h.assumptions.map((a) => el("li", {}, richText(a, catalogue)))) : el("p", { class: "muted" }, DASH)),
-      panel("Unsicherheit", el("div", { class: "big-value" }, h.uncertainty || DASH),
-        el("p", { class: "small muted" }, `Konfidenz des Vorschlags ${CONF_TEXT[c.confidence] || DASH}, Datenlage ${DQ_TEXT[dq.status] || DASH}.`),
+      panel("Daten-/Analyseunsicherheit", el("div", { class: "big-value" }, h.uncertainty || DASH),
+        el("p", { class: "small muted" }, `Entscheidungskonfidenz des Vorschlags ${CONF_TEXT[c.confidence] || DASH}, Datenlage ${DQ_TEXT[dq.status] || DASH}.`),
         el("p", { class: "small muted" }, ec ? (ec.ok ? `Belegprüfung bestanden (Versuch ${ec.attempt}).` : `Belegprüfung: ${ec.problems.join("; ")}`) : "")),
-      panel("Datenlücken", engineGaps.length || (h.data_gaps || []).length
-        ? el("ul", { class: "evidence" }, engineGaps.map((g) => el("li", {}, gapText(g))), (h.data_gaps || []).map((g) => el("li", {}, richText(g, catalogue))))
-        : el("p", { class: "muted" }, "keine"), technicalCodes(engineGaps))));
+      panel("Datenlücken", gapList.length ? el("ul", { class: "evidence" }, gapList.map((g) => el("li", {}, g.code ? g.text : richText(g.text, catalogue))))
+        : el("p", { class: "muted" }, "keine"), technicalCodes([...new Set([...engineGaps, ...modelCodes])]))));
   }
   if (o.security) {
     const pos = risk.position || o.position;

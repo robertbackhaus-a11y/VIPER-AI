@@ -562,11 +562,6 @@ def _build_position(
     price_currency = snapshot["currency"] if snapshot is not None else None
     position_currency = row["currency"]
     avg_cost = row["avg_cost"]
-    currency_matches = (
-        position_currency is not None
-        and price_currency is not None
-        and position_currency.upper() == price_currency.upper()
-    )
     if snapshot is None or price is None:
         fx_resolution = None
         valuation_price = None
@@ -600,7 +595,10 @@ def _build_position(
     if snapshot is None or price is None:
         status = AvailabilityStatus.PARTIAL
         details = ("no market_snapshot price",)
-    elif not currency_matches:
+    elif valuation_price is None:
+        # A different quote currency is no gap by itself: only a conversion
+        # that failed (FX missing or stale, currency unknown) leaves the
+        # position without a valuation.
         status = AvailabilityStatus.PARTIAL
         details = tuple(fx_quality.details) or ("position and market price currencies differ",)
     return PositionContext(

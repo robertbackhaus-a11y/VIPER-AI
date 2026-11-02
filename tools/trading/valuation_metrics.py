@@ -16,8 +16,9 @@ Inputs (all point-in-time for the price date, with the same visibility rule as t
   sum of the discrete quarters 1..n; a missing quarter leaves that flow empty, it is never filled in;
 * balance sheet (equity, cash, debt): the latest visible fundamentals row of that source;
 * shares outstanding: the newest count of that source not older than the TTM anchor, else the newest such count of another source of the same company (for
-  example an IR row when the TTM comes from SEC).  The count must pass ``shares_conflict``, and a depositary receipt (ADR/ADS) never takes a filed count: the
-  filing counts underlying shares and the depositary ratio is not in the data.
+  example an IR row when the TTM comes from SEC).  The count must pass ``shares_conflict`` and ``shares_jump``.  A depositary receipt (ADR/ADS) turns the filed
+  count, which counts underlying shares, into depositary shares with the reviewed ratio of ``universe/adr_ratios_v1.json`` valid on the count's date
+  (``depositary_shares``); without such a ratio it keeps no count.
 
 Fundamentals in another currency than the price are converted into the price currency with the stored ECB rate of ``fx_resolver.resolve_fx_rate`` (direct EUR
 pairs, no cross rates): balance-sheet values at the balance-sheet period end, TTM flows at the TTM period end.  Without a usable rate on that date the values of
@@ -30,10 +31,13 @@ An empty multiple never drops the others.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import fx_resolver
@@ -47,6 +51,12 @@ TTM_MAX_AGE_DAYS = 550
 
 # Below this EPS the rounding of the reported EPS makes net income / EPS too coarse for the share-count check.
 SHARES_CHECK_MIN_EPS = 0.10
+
+# A share count more than this factor away from the company's previous count (either way) is a jump of the order of magnitude, not a buyback or an issue.
+SHARES_JUMP_FACTOR = 2.0
+
+# Reviewed depositary ratios (versioned, next to the other universe files).
+ADR_RATIOS_FILE = Path(__file__).resolve().parent / "universe" / "adr_ratios_v1.json"
 
 MULTIPLES = ("pe_ttm", "ps_ttm", "pb", "ev_revenue", "ev_ebitda", "p_fcf", "fcf_yield_pct")
 FLOWS = ("revenue", "net_income", "ebitda", "free_cash_flow", "operating_cash_flow", "capex")
@@ -234,6 +244,64 @@ def depositary_receipt(security: Optional[sqlite3.Row]) -> bool:
     return (security["isin"] or "").upper().startswith("US") and country not in ("", "US")
 
 
+@lru_cache(maxsize=4)
+def _adr_ratios(path: str) -> dict[str, dict]:
+    """The entries of the ratio file by ISIN; an unreadable file gives none (every depositary receipt then keeps no count)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            entries = json.load(f).get("entries") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {str(e.get("isin") or "").upper(): e for e in entries if isinstance(e, dict) and e.get("isin")}
+
+
+def adr_entry(security: Optional[sqlite3.Row], path: Path = ADR_RATIOS_FILE) -> Optional[dict]:
+    """The reviewed ratio entry of a listing (by ISIN), or None."""
+    if security is None:
+        return None
+    return _adr_ratios(str(path)).get((security["isin"] or "").upper())
+
+
+def depositary_shares(entry: Optional[dict], underlying: float, counted_on: str) -> tuple[Optional[float], str]:
+    """(depositary-share equivalents, note) of an underlying share count dated ``counted_on``; None with the reason without a valid ratio for that date.
+
+    depositary shares = underlying shares / ordinary_shares_per_depositary_share.  The ratio must be a positive number and ``valid_from`` a date on or
+    before the count's date: a ratio is never assumed for a period its source does not cover.
+    """
+    if entry is None:
+        return None, "the listing is a depositary receipt and the filed count is in underlying shares; no reviewed ratio in adr_ratios_v1.json"
+    ratio = entry.get("ordinary_shares_per_depositary_share")
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or ratio <= 0:
+        return None, f"invalid depositary ratio {ratio!r} in adr_ratios_v1.json"
+    valid_from = str(entry.get("valid_from") or "")
+    try:
+        date.fromisoformat(valid_from)
+    except ValueError:
+        return None, f"depositary ratio without a valid 'valid_from' date ({valid_from!r}) in adr_ratios_v1.json"
+    if counted_on[:10] < valid_from:
+        return None, f"depositary ratio is reviewed from {valid_from}, the share count is dated {counted_on[:10]}"
+    return float(underlying) / float(ratio), f"{float(underlying):,.0f} underlying shares on {counted_on[:10]} / {ratio:g} per depositary share (adr_ratios_v1)"
+
+
+def shares_jump(rows: list[sqlite3.Row], chosen: Optional[sqlite3.Row]) -> Optional[str]:
+    """Why ``chosen`` jumps by an order of magnitude against the company's previous count, or None.
+
+    The previous count is the newest count of any source with an earlier period end.  A factor above ``SHARES_JUMP_FACTOR`` either way has no ordinary
+    explanation (issue, buyback, conversion) and points at a unit, class or ADR mix-up; such a count is not used.
+    """
+    if chosen is None:
+        return None
+    previous = next((r for r in rows if r["shares_outstanding"] is not None and float(r["shares_outstanding"]) > 0
+                     and r["period_end"] < chosen["period_end"]), None)
+    if previous is None:
+        return None
+    factor = float(chosen["shares_outstanding"]) / float(previous["shares_outstanding"])
+    if 1 / SHARES_JUMP_FACTOR <= factor <= SHARES_JUMP_FACTOR:
+        return None
+    return (f"{float(chosen['shares_outstanding']):,.0f} on {chosen['period_end']} jumps x{factor:.3g} against "
+            f"{float(previous['shares_outstanding']):,.0f} on {previous['period_end']}")
+
+
 def _converted(conn: sqlite3.Connection, values: dict[str, Optional[float]], from_currency: str, to_currency: str, on: Optional[str],
                label: str, notes: list[str]) -> dict[str, Optional[float]]:
     """``values`` in ``to_currency`` at the stored ECB rate on ``on``; all None, with the reason in ``notes``, without a usable rate."""
@@ -301,14 +369,20 @@ def calculate(conn: sqlite3.Connection, security_id: int, as_of: Optional[str] =
                          and (anchor is None or r["period_end"] >= anchor["period_end"])), None)
         shares_row = newest_count(source_rows) or newest_count(rows)
         row.shares_outstanding = None if shares_row is None else float(shares_row["shares_outstanding"])
-        conflict = shares_conflict(shares_row)
+        if row.shares_outstanding is not None and row.shares_outstanding <= 0:
+            notes.append(f"shares_outstanding: {row.shares_outstanding:,.0f} on {shares_row['period_end']} is not positive")
+            row.shares_outstanding = None
+        conflict = shares_conflict(shares_row) if row.shares_outstanding is not None else None
+        conflict = conflict or (shares_jump(rows, shares_row) if row.shares_outstanding is not None else None)
         if conflict:
             notes.append(f"shares_outstanding: {conflict}")
             row.shares_outstanding = None
         security = conn.execute("SELECT name, isin, country FROM security WHERE id = ?", (int(security_id),)).fetchone()
-        if row.shares_outstanding is not None and depositary_receipt(security):
-            notes.append("shares_outstanding: the listing is a depositary receipt and the filed count is in underlying shares (ratio not in the data)")
-            row.shares_outstanding = None
+        entry = adr_entry(security)
+        if row.shares_outstanding is not None and (entry is not None or depositary_receipt(security)):
+            # The checks above ran on the underlying count (net income / EPS are per ordinary share); the ratio converts it afterwards.
+            row.shares_outstanding, note = depositary_shares(entry, row.shares_outstanding, shares_row["period_end"])
+            notes.append(f"shares_outstanding: {note}")
         if row.currency and row.price_currency and row.currency != row.price_currency:
             # Market cap stays price x shares in the price currency; the fundamentals follow it, each group at the rate of its own date.
             balance_values = _converted(conn, {"total_equity": row.total_equity, "cash": row.cash, "total_debt": row.total_debt}, row.currency,

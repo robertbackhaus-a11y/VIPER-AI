@@ -824,8 +824,9 @@ def upsert_fundamental(
             total_equity =
                 excluded.total_equity,
 
+            -- a parser without a count keeps a count filled in by Research-TradingFundamentals.py
             shares_outstanding =
-                excluded.shares_outstanding,
+                COALESCE(excluded.shares_outstanding, fundamentals.shares_outstanding),
 
             fetched_at =
                 excluded.fetched_at

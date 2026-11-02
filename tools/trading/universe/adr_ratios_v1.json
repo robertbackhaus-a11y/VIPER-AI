@@ -1,0 +1,52 @@
+{
+  "universe_id": "adr_ratios_v1",
+  "version": 1,
+  "description": "Reviewed depositary ratios of the depositary-receipt listings (ADR/ADS) in the database, used by valuation_metrics to turn a filed share count, which counts the underlying ordinary shares, into depositary-share equivalents: depositary shares = underlying shares / ordinary_shares_per_depositary_share. Only ratios read from the issuer's or the depositary's own SEC filing are listed, never one inferred from prices. 'valid_from' is the start of the first fiscal period the cited filing covers: a share count dated before it gets no ratio and the market cap stays empty. A listing that is not in this file keeps no share count.",
+  "entries": [
+    {
+      "isin": "US8740391003",
+      "symbol": "TSM",
+      "name": "Taiwan Semiconductor Manufacturing Company Limited",
+      "underlying": "common shares (TWSE 2330)",
+      "ordinary_shares_per_depositary_share": 5,
+      "valid_from": "2024-01-01",
+      "sources": [
+        {"document": "Form 20-F for fiscal 2025, filed 2026-04-16", "accession": "0001628280-26-025362",
+         "url": "https://www.sec.gov/Archives/edgar/data/1046179/000162828026025362/tsm-20251231.htm",
+         "statement": "each ADS represents five (5) common shares"},
+        {"document": "Form 20-F for fiscal 2024, filed 2025-04-17", "accession": "0001193125-25-083423",
+         "url": "https://www.sec.gov/Archives/edgar/data/1046179/000119312525083423/d896993d20f.htm",
+         "statement": "5,313,816,033 common shares, represented by 1,062,763,201 ADSs (= 5.000 per ADS), as of February 28, 2025"}
+      ]
+    },
+    {
+      "isin": "US88032Q1094",
+      "symbol": "TCEHY",
+      "name": "Tencent Holdings Limited",
+      "underlying": "ordinary shares (HKEX 0700)",
+      "ordinary_shares_per_depositary_share": 1,
+      "valid_from": "2025-01-01",
+      "sources": [
+        {"document": "Form F-6EF, Deutsche Bank Trust Company Americas, filed 2026-09-03", "accession": "0001104659-26-104999",
+         "url": "https://www.sec.gov/Archives/edgar/data/1625990/000110465926104999/tm2624682d1_f6ef.htm",
+         "statement": "American Depositary Shares, each representing one (1) ordinary share of Tencent Holdings Limited"},
+        {"document": "Form F-6EF, Citibank, N.A., filed 2025-01-07", "accession": "0001193805-25-000019",
+         "url": "https://www.sec.gov/Archives/edgar/data/1625990/000119380525000019/e664130_f6ef-thl.htm",
+         "statement": "representing the right to receive one (1) share of common stock of Tencent Holdings Limited"}
+      ]
+    },
+    {
+      "isin": "US90138A1034",
+      "symbol": "VNET",
+      "name": "VNET Group, Inc.",
+      "underlying": "Class A ordinary shares",
+      "ordinary_shares_per_depositary_share": 6,
+      "valid_from": "2025-01-01",
+      "sources": [
+        {"document": "Form 20-F for fiscal 2025, filed 2026-04-16", "accession": "0001104659-26-044361",
+         "url": "https://www.sec.gov/Archives/edgar/data/1508475/000110465926044361/vnet-20251231x20f.htm",
+         "statement": "American depositary shares, each representing six Class A ordinary shares"}
+      ]
+    }
+  ]
+}

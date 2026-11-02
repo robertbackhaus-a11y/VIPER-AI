@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
+import valuation_metrics  # sibling module: the share-count check shared with the valuation
 from typing import Optional
 
 
@@ -828,6 +830,18 @@ def expected_unit_type(
     return "money"
 
 
+MONEY_UNITS = {
+    "USD",
+    "EUR",
+    "GBP",
+    "CAD",
+    "KRW",
+    "JPY",
+    "TWD",
+    "CHF",
+}
+
+
 def unit_rank(
     unit: str,
     metric: str,
@@ -852,21 +866,16 @@ def unit_rank(
             "-PER-SHARES" in unit_upper
             or "/SHARES" in unit_upper
         ):
-            return 100
+            # Same currency preference as the monetary concepts: a filer
+            # that reports in CNY with a USD convenience translation must
+            # not get a CNY EPS next to a USD net income.
+            currency = unit_upper.replace("-PER-SHARES", "/SHARES").split("/")[0]
+            return 100 if currency in MONEY_UNITS else 90
 
         return 20
 
     # Monetary concepts.
-    if unit_upper in {
-        "USD",
-        "EUR",
-        "GBP",
-        "CAD",
-        "KRW",
-        "JPY",
-        "TWD",
-        "CHF",
-    }:
+    if unit_upper in MONEY_UNITS:
         return 100
 
     return 10
@@ -1164,6 +1173,7 @@ def ensure_record(
             "_cost_of_revenue": None,
             "_depreciation_amortization": None,
             "_latest_filed": None,
+            "_units": {},
         }
 
     return records[key]
@@ -1220,6 +1230,9 @@ def merge_metric(
             target_metric = metric
 
         record[target_metric] = value
+
+        if fact.get("unit") and metric != "shares_outstanding":
+            record["_units"][target_metric] = fact["unit"].upper()
 
         # Fiscal metadata must come from duration statement
         # facts where possible. Instant balance-sheet facts can
@@ -1495,6 +1508,16 @@ def build_records(
 
     for record in records.values():
 
+        # One currency per period: a value whose unit is another
+        # currency than the period's (e.g. a CNY debt next to USD
+        # convenience figures of a 20-F) is not stored, it is never
+        # mixed in.
+        if record["currency"]:
+            for metric, unit in record["_units"].items():
+                unit_currency = re.match(r"[A-Z]{3}(?![A-Z])", unit)
+                if unit_currency and unit_currency.group(0) != record["currency"]:
+                    record[metric] = None
+
         # Debt:
         #
         # 1. Prefer an explicit long-term debt concept that
@@ -1735,6 +1758,345 @@ def build_records(
         result,
         taxonomy_name,
     )
+
+
+# ============================================================
+# SHARE CLASSES
+# ============================================================
+
+# CompanyFacts carries no dimensional facts, so a filer that reports its
+# share count per class (Class A / Class B ...) has no count there at all.
+# For such a period the XBRL instance of the period's own 10-Q/10-K/20-F
+# gives the count per class. The classes are summed only when all of them
+# share the earnings: a filing that reports EPS for some classes only
+# (e.g. Class B with voting rights but no economic interest) is not
+# summed, and neither is a filing with a single class member. The total
+# must agree with the period's net income / EPS
+# (valuation_metrics.shares_conflict); without a usable EPS it is not
+# stored either. Never "the largest class".
+
+CLASS_SHARES_LOOKBACK_DAYS = 3 * 366
+
+CLASS_FILING_FORMS = {
+    "10-K",
+    "10-K/A",
+    "10-Q",
+    "10-Q/A",
+    "20-F",
+    "20-F/A",
+}
+
+XBRLI = "{http://www.xbrl.org/2003/instance}"
+XBRLDI = "{http://xbrl.org/2006/xbrldi}"
+
+CLASS_AXIS = "StatementClassOfStockAxis"
+
+NON_COMMON_MEMBER = re.compile(
+    r"Preferred|Treasury|Warrant|Unit|Redeemable",
+    re.I,
+)
+
+
+def instance_cache_path(
+    accn: str,
+) -> Path:
+
+    return SEC_CACHE_DIR / "instances" / f"{accn}.xml"
+
+
+def get_bytes(
+    url: str,
+) -> Optional[bytes]:
+
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": SEC_USER_AGENT},
+    )
+
+    try:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT_SECONDS * 3,
+        ) as response:
+
+            return response.read()
+
+    except Exception as exc:
+
+        print(
+            f"      HTTP error: {exc}"
+        )
+
+        return None
+
+
+def fetch_instance(
+    cik: str,
+    accn: str,
+    use_cache: bool,
+) -> Optional[bytes]:
+    """The XBRL instance document of one filing (cached: a filed
+    instance never changes)."""
+
+    path = instance_cache_path(accn)
+
+    if use_cache and path.is_file():
+        return path.read_bytes()
+
+    base = (
+        "https://www.sec.gov/Archives/edgar/data/"
+        f"{int(cik)}/{accn.replace('-', '')}/"
+    )
+
+    index = get_bytes(base + "index.json")
+
+    time.sleep(REQUEST_DELAY_SECONDS)
+
+    if index is None:
+        return None
+
+    names = [
+        item.get("name", "")
+        for item in json.loads(index).get("directory", {}).get("item", [])
+    ]
+
+    candidates = [n for n in names if n.endswith("_htm.xml")] or [
+        n
+        for n in names
+        if n.endswith(".xml")
+        and not re.search(r"_(cal|def|lab|pre)\.xml$", n)
+        and n != "FilingSummary.xml"
+    ]
+
+    if len(candidates) != 1:
+        return None
+
+    data = get_bytes(base + candidates[0])
+
+    time.sleep(REQUEST_DELAY_SECONDS)
+
+    if data is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    return data
+
+
+def filing_accessions(
+    companyfacts: dict,
+) -> dict:
+    """{(filing date, 'annual'|'quarterly'): accession} of the periodic
+    reports in CompanyFacts; a date with two such filings is left out."""
+
+    found: dict = {}
+
+    for taxonomy in (companyfacts.get("facts") or {}).values():
+        for concept in taxonomy.values():
+            for items in (concept.get("units") or {}).values():
+                for item in items:
+                    form = item.get("form")
+                    if form not in CLASS_FILING_FORMS:
+                        continue
+                    ptype = "annual" if form in ANNUAL_FORMS else "quarterly"
+                    found.setdefault((item.get("filed"), ptype), set()).add(item.get("accn"))
+
+    return {
+        key: next(iter(accns))
+        for key, accns in found.items()
+        if len(accns) == 1
+    }
+
+
+def class_counts(
+    instance: bytes,
+    period_end: str,
+) -> tuple[Optional[dict], set, str]:
+    """({class member: shares}, {members with their own EPS}, basis) of the
+    instance's own period. Balance-sheet counts at the period end win over
+    the cover-page counts; None when the instance is not about this
+    period."""
+
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(instance)
+
+    contexts = {}
+
+    for ctx in root.iter(XBRLI + "context"):
+        members = [
+            (m.get("dimension", "").split(":")[-1], (m.text or "").strip())
+            for m in ctx.iter(XBRLDI + "explicitMember")
+        ]
+        instant = ctx.find(f"{XBRLI}period/{XBRLI}instant")
+        contexts[ctx.get("id")] = (
+            None if instant is None else (instant.text or "").strip(),
+            members,
+        )
+
+    document_end = None
+    balance: dict = {}
+    cover: dict = {}
+    eps_classes: set = set()
+
+    for element in root:
+        name = element.tag.split("}")[-1]
+        when, members = contexts.get(element.get("contextRef"), (None, []))
+        single_class = (
+            len(members) == 1
+            and members[0][0] == CLASS_AXIS
+        )
+        if name == "DocumentPeriodEndDate" and not members:
+            document_end = (element.text or "").strip()[:10]
+        if not single_class:
+            continue
+        member = members[0][1]
+        if name in ("EarningsPerShareBasic", "EarningsPerShareDiluted"):
+            eps_classes.add(member)
+            continue
+        if NON_COMMON_MEMBER.search(member):
+            continue
+        try:
+            value = float(element.text)
+        except (TypeError, ValueError):
+            continue
+        if name == "CommonStockSharesOutstanding" and when == period_end:
+            balance[member] = value
+        elif name == "EntityCommonStockSharesOutstanding":
+            cover[member] = value
+
+    if document_end != period_end:
+        return None, eps_classes, "instance is about another period"
+
+    if sum(1 for v in balance.values() if v > 0) >= 2:
+        return balance, eps_classes, "balance sheet"
+
+    return cover, eps_classes, "cover page"
+
+
+def weighted_average_shares(
+    companyfacts: dict,
+    record: dict,
+) -> Optional[float]:
+    """The weighted average basic share count of the record's period in
+    the record's own filing (all classes together), or None."""
+
+    values = set()
+
+    for taxonomy, concept in (
+        ("us-gaap", "WeightedAverageNumberOfSharesOutstandingBasic"),
+        ("ifrs-full", "WeightedAverageShares"),
+    ):
+        items = (
+            ((companyfacts.get("facts") or {}).get(taxonomy) or {})
+            .get(concept, {})
+            .get("units", {})
+            .get("shares", [])
+        )
+        for item in items:
+            if item.get("end") == record["period_end"] and item.get("filed") == record["filing_date"]:
+                start, end = parse_date(item.get("start")), parse_date(item.get("end"))
+                if start is None or end is None:
+                    continue
+                days = (end - start).days
+                if (days > 300) if record["period_type"] == "annual" else (days < 100):
+                    values.add(float(item["val"]))
+
+    return values.pop() if len(values) == 1 else None
+
+
+def attach_class_totals(
+    records: list,
+    companyfacts: dict,
+    cik: str,
+    use_cache: bool,
+) -> list:
+    """Fill shares_outstanding of recent periods without a count from the
+    sum of the share classes of the period's own filing. Returns one note
+    per period that was looked at."""
+
+    notes = []
+
+    accessions = filing_accessions(companyfacts)
+
+    cutoff = datetime.now(timezone.utc).date().toordinal() - CLASS_SHARES_LOOKBACK_DAYS
+
+    for record in records:
+
+        if record["shares_outstanding"] is not None or not record["filing_date"]:
+            continue
+
+        period = parse_date(record["period_end"])
+
+        if period is None or period.toordinal() < cutoff:
+            continue
+
+        accn = accessions.get((record["filing_date"], record["period_type"]))
+
+        if accn is None:
+            continue
+
+        instance = fetch_instance(cik, accn, use_cache)
+
+        if instance is None:
+            notes.append(f"{record['period_end']}: instance of {accn} unavailable")
+            continue
+
+        counts, eps_classes, basis = class_counts(instance, record["period_end"])
+
+        label = f"{record['period_end']} ({accn}, {basis})"
+
+        if counts is None:
+            continue
+
+        classes = {member: value for member, value in counts.items() if value > 0}
+
+        if len(classes) < 2:
+            if classes:
+                notes.append(f"{label}: one class only ({', '.join(classes)}); not a total, not stored")
+            continue
+
+        if eps_classes and not set(classes) <= eps_classes:
+            notes.append(
+                f"{label}: EPS reported for {', '.join(sorted(eps_classes))} only, "
+                f"so {', '.join(sorted(set(classes) - eps_classes))} carry no earnings; classes not summed"
+            )
+            continue
+
+        total = sum(classes.values())
+
+        eps = record["eps_diluted"] if record["eps_diluted"] is not None else record["eps_basic"]
+
+        if not (
+            eps is None
+            or record["net_income"] is None
+            or abs(float(eps)) < valuation_metrics.SHARES_CHECK_MIN_EPS
+            or float(record["net_income"]) / float(eps) <= 0
+        ):
+            conflict = valuation_metrics.shares_conflict({**record, "shares_outstanding": total})
+        else:
+            # EPS too small (or missing) for the check: the weighted average
+            # basic share count the same filing reports for this period.
+            average = weighted_average_shares(companyfacts, record)
+            if average is None:
+                notes.append(f"{label}: sum {total:,.0f} of {len(classes)} classes not checkable (no usable EPS, no weighted average); not stored")
+                continue
+            factor = total / average
+            conflict = None if 0.5 <= factor <= 2.0 else f"{total:,.0f} is inconsistent with the weighted average basic shares ({average:,.0f})"
+
+        if conflict:
+            notes.append(f"{label}: sum of {len(classes)} classes {conflict}; not stored")
+            continue
+
+        record["shares_outstanding"] = total
+
+        notes.append(
+            f"{label}: shares_outstanding = "
+            + " + ".join(f"{member.split(':')[-1]} {value:,.0f}" for member, value in sorted(classes.items()))
+            + f" = {total:,.0f}"
+        )
+
+    return notes
 
 
 # ============================================================
@@ -2034,6 +2396,16 @@ def import_security(
     print(
         f"    -> parsed periods: {len(records)}"
     )
+
+    for note in attach_class_totals(
+        records,
+        data,
+        cik,
+        use_cache,
+    ):
+        print(
+            f"    -> share classes {note}"
+        )
 
     if not records:
 

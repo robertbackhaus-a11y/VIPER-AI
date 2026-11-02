@@ -92,6 +92,7 @@
       "source": "tools/trading/universe",
       "target": "app/universe",
       "files": [
+        "adr_ratios_v1.json",
         "etf_listing_symbols_v1.json",
         "etf_sector_mapping_v1.json",
         "news_feeds_v1.json",

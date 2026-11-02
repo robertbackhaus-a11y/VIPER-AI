@@ -55,7 +55,11 @@ Flags:
         hand-validated reference rows above, since they share the same
         "Company IR" source_id and unique key that this tool writes to.
         A period whose stored values already match the candidate is
-        always written (harmless refresh), --force or not.
+        always written (harmless refresh), --force or not. A candidate
+        that only adds values to empty fields of a stored period (e.g.
+        shares_outstanding) and agrees with every stored value fills
+        those fields into the stored row and its source; a filled
+        shares_outstanding must pass the net income / EPS check.
 
 This is the single, canonical fundamentals-research tool for this project.
 """
@@ -68,6 +72,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 import runtime_paths  # sibling module: the runtime root (VIPER_TRADING_ROOT) and its default paths
+import valuation_metrics  # sibling module: the share-count check shared with the valuation
 
 DB_PATH = runtime_paths.default_db_path()
 AUDIT_DIR = runtime_paths.data_dir() / "fundamentals-audit"
@@ -118,11 +123,11 @@ def get_existing_fundamentals(conn, security_id):
     rows = conn.execute(
         """
         SELECT f.period_end, f.period_type, f.fiscal_year, f.fiscal_quarter,
-               f.currency, f.revenue, f.gross_profit, f.operating_income, f.ebit,
+               f.filing_date, f.currency, f.revenue, f.gross_profit, f.operating_income, f.ebit,
                f.ebitda, f.net_income, f.eps_basic, f.eps_diluted,
                f.operating_cash_flow, f.capex, f.free_cash_flow, f.cash,
                f.total_debt, f.total_assets, f.total_liabilities, f.total_equity,
-               f.shares_outstanding, ds.name AS source_name
+               f.shares_outstanding, f.source_id, f.fetched_at, ds.name AS source_name
         FROM fundamentals f
         JOIN data_sources ds ON ds.id = f.source_id
         WHERE f.security_id = ?
@@ -442,6 +447,12 @@ def validate_response(security_id, response):
         if clean.get("capex") is not None and clean["capex"] < 0:
             check("capex stored as positive outflow magnitude", False, str(clean["capex"]))
 
+        if clean.get("shares_outstanding") is not None:
+            check("shares_outstanding > 0", clean["shares_outstanding"] > 0, str(clean["shares_outstanding"]))
+            # Same net income / EPS check as the valuation (valuation_metrics.shares_conflict): a single class or a count in another unit fails here.
+            conflict = valuation_metrics.shares_conflict({**clean, "period_end": period_end}) if clean["shares_outstanding"] > 0 else None
+            check("shares_outstanding ~= net_income / eps", conflict is None, conflict or "")
+
         if clean.get("total_debt") is None:
             checks.append({"check": "total_debt", "status": "WARN", "detail": "not verified -> NULL"})
 
@@ -498,6 +509,23 @@ def values_equal(existing, candidate):
     return True
 
 
+def fill_fields(existing, candidate):
+    """The fields the candidate adds to an existing row it otherwise agrees with: {field: value}, or None when it
+    changes a stored value or the currency. A field the candidate leaves null keeps its stored value."""
+    if (existing.get("currency") or "").upper() != (candidate.get("currency") or "").upper():
+        return None
+    added = {}
+    for field in FIELDS:
+        old, new = existing.get(field), candidate.get(field)
+        if new is None:
+            continue
+        if old is None:
+            added[field] = new
+        elif abs(old - new) > max(abs(old) * DIFF_TOLERANCE_REL, DIFF_TOLERANCE_ABS):
+            return None
+    return added
+
+
 def find_existing(existing_rows, period):
     for row in existing_rows:
         if row["period_end"] == period["period_end"] and row["period_type"] == period["period_type"]:
@@ -515,6 +543,14 @@ def decide_write_action(period, existing_rows, write_enabled, force):
         return {"action": "WRITE", "reason": "new period"}
     if values_equal(match, period):
         return {"action": "WRITE", "reason": "refresh (unchanged)"}
+    added = None if force else fill_fields(match, period)
+    if added:
+        # Only empty fields are filled, into the stored row and its source: a hand-validated value is never changed.
+        merged = {**match, **{f: (match.get(f) if match.get(f) is not None else added.get(f)) for f in FIELDS}}
+        conflict = valuation_metrics.shares_conflict(merged) if "shares_outstanding" in added else None
+        if conflict:
+            return {"action": "SKIP", "reason": f"fill rejected: shares_outstanding {conflict}"}
+        return {"action": "WRITE", "reason": "fill empty field(s): " + ", ".join(sorted(added)), "row": merged}
     if force:
         return {"action": "WRITE", "reason": "overwrite (--force)"}
     return {
@@ -601,7 +637,8 @@ def upsert_fundamental(conn, source_id, security_id, row):
             row.get("eps_basic"), row.get("eps_diluted"), row.get("operating_cash_flow"), row.get("capex"),
             row.get("free_cash_flow"), row.get("cash"), row.get("total_debt"), row.get("total_assets"),
             row.get("total_liabilities"), row.get("total_equity"), row.get("shares_outstanding"),
-            source_id, datetime.now(timezone.utc).isoformat(),
+            # a fill keeps the row's fetch time: the stored values do not become visible later (point in time)
+            source_id, row.get("fetched_at") or datetime.now(timezone.utc).isoformat(),
         ),
     )
 
@@ -714,7 +751,7 @@ def main():
                 print("Dry run (default without --write) -- no DB write. Re-run with --write to persist.")
             return
 
-        to_write = [p for p, d in zip(accepted, decisions) if d["action"] == "WRITE"]
+        to_write = [(p, d) for p, d in zip(accepted, decisions) if d["action"] == "WRITE"]
         skipped_failed = sum(1 for d in decisions if d["action"] == "SKIP" and d["reason"] == "failed validation")
         skipped_conflict = sum(1 for d in decisions if d["action"] == "SKIP" and d["reason"] != "failed validation")
         if skipped_failed:
@@ -727,7 +764,11 @@ def main():
 
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for p in to_write:
+            for p, d in to_write:
+                if "row" in d:
+                    # A fill writes the stored row back with its empty fields filled, under the row's own source.
+                    upsert_fundamental(conn, d["row"]["source_id"], args.security_id, d["row"])
+                    continue
                 source_id = company_ir_id if p["_all_primary"] else web_id
                 upsert_fundamental(conn, source_id, args.security_id, p)
             conn.execute("COMMIT")

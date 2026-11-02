@@ -21,7 +21,7 @@ Inputs (all point-in-time for the price date, with the same visibility rule as t
   (``depositary_shares``); without such a ratio it keeps no count.
 
 Fundamentals in another currency than the price are converted into the price currency with the stored ECB rate of ``fx_resolver.resolve_fx_rate`` (direct EUR
-pairs, no cross rates): balance-sheet values at the balance-sheet period end, TTM flows at the TTM period end.  Without a usable rate on that date the values of
+pairs, or both EUR rates of one ECB day): balance-sheet values at the balance-sheet period end, TTM flows at the TTM period end.  Without a usable rate on that date the values of
 that group stay empty, and so do the multiples that need them; nothing is estimated.
 
 A multiple is left empty, with its reason, when an input is missing or the denominator is not positive (no P/E from a loss, no EV multiple from a negative EV).

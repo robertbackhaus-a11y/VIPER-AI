@@ -3,9 +3,12 @@
 
 """Read-only, ECB-convention FX resolution for valuation.
 
-ECB rates are stored only as ``1 EUR = N quote currency``.  Phase 3A.5
-supports direct EUR pairs; it deliberately does not triangulate currencies.
-Provider pence quotes (``GBp``) are first normalized to GBP (x0.01).
+ECB rates are stored only as ``1 EUR = N quote currency``.  A pair with EUR
+on one side is resolved directly.  A pair of two other currencies is
+triangulated through EUR only, ``SOURCE -> EUR -> TARGET``, when both stored
+EUR rates exist on the same ECB day; there is no other intermediate currency
+and no longer chain.  Provider pence quotes (``GBp``) are first normalized to
+GBP (x0.01).
 """
 
 from __future__ import annotations
@@ -152,11 +155,7 @@ def resolve_fx_rate(
     elif to_code == "EUR":
         base_currency, quote_currency, factor_kind = "EUR", from_code, "divide"
     else:
-        return FXRateResolution(
-            from_currency=from_label,
-            to_currency=to_code,
-            quality=DataQuality(AvailabilityStatus.UNAVAILABLE, ("direct EUR-based FX pair is unavailable",), as_of_date),
-        )
+        return _triangulate_via_eur(conn, from_currency, from_label, to_code, as_of_date, fx_config, table_exists_cache)
     row = conn.execute(
         """
         SELECT rate_date, rate, source
@@ -194,4 +193,66 @@ def resolve_fx_rate(
         source=row["source"],
         quality=quality,
         price_factor=price_factor,
+    )
+
+
+TRIANGULATED_SOURCE_SUFFIX = " via EUR"
+
+
+def _triangulate_via_eur(
+    conn: sqlite3.Connection,
+    from_currency: str,
+    from_label: str,
+    to_code: str,
+    as_of_date: str,
+    fx_config: FXConfig,
+    table_exists_cache: Optional[dict[str, bool]],
+) -> FXRateResolution:
+    """``SOURCE -> EUR -> TARGET`` from the two stored EUR rates; EUR is the only intermediate.
+
+    Each leg is a direct EUR pair resolved by :func:`resolve_fx_rate` with the same point-in-time and age rule.  Both legs must come
+    from the same ECB day: with ``1 EUR = s SOURCE`` and ``1 EUR = t TARGET`` on that day, ``1 SOURCE = t / s TARGET``.  A missing,
+    stale or differently dated leg leaves the pair unresolved, with the reason.
+    """
+
+    to_eur = resolve_fx_rate(conn, from_currency, "EUR", as_of_date, fx_config, table_exists_cache=table_exists_cache)
+    from_eur = resolve_fx_rate(conn, "EUR", to_code, as_of_date, fx_config, table_exists_cache=table_exists_cache)
+    source_code = normalize_quote_unit(from_currency)[0]
+    legs = ((f"{source_code}->EUR", to_eur), (f"EUR->{to_code}", from_eur))
+    for label, leg in legs:
+        if leg.conversion_factor is None:
+            why = "; ".join(leg.quality.details) or leg.quality.status.value
+            status = AvailabilityStatus.STALE if leg.quality.status is AvailabilityStatus.STALE else AvailabilityStatus.UNAVAILABLE
+            return FXRateResolution(
+                from_currency=from_label,
+                to_currency=to_code,
+                quality=DataQuality(status, (f"EUR triangulation: {label} leg unavailable ({why})",), leg.quality.as_of or as_of_date),
+                price_factor=to_eur.price_factor,
+            )
+    if to_eur.rate_date != from_eur.rate_date:
+        return FXRateResolution(
+            from_currency=from_label,
+            to_currency=to_code,
+            quality=DataQuality(
+                AvailabilityStatus.UNAVAILABLE,
+                (f"EUR triangulation: legs from different days ({source_code} {to_eur.rate_date}, {to_code} {from_eur.rate_date})",),
+                as_of_date,
+            ),
+            price_factor=to_eur.price_factor,
+        )
+    # Stored rows are "1 EUR = rate quote"; to_eur.rate = s (EUR/SOURCE row), from_eur.rate = t (EUR/TARGET row).
+    rate = float(from_eur.rate) / float(to_eur.rate)
+    return FXRateResolution(
+        from_currency=from_label,
+        to_currency=to_code,
+        rate=rate,
+        conversion_factor=to_eur.conversion_factor * from_eur.conversion_factor,
+        rate_date=to_eur.rate_date,
+        source=f"{to_eur.source}{TRIANGULATED_SOURCE_SUFFIX}",
+        quality=DataQuality(
+            AvailabilityStatus.AVAILABLE,
+            (f"triangulated via EUR: 1 EUR = {to_eur.rate:g} {source_code}, 1 EUR = {from_eur.rate:g} {to_code} ({to_eur.rate_date})",),
+            to_eur.rate_date,
+        ),
+        price_factor=to_eur.price_factor,
     )

@@ -70,7 +70,7 @@ Funktionen gibt es im Code nicht und sie werden deshalb neu, aber als rein lesen
 | Größe | Regel im Code |
 |---|---|
 | Depotwert (EUR) | `analysis_engine.build_portfolio_context`: je offener Position Stück × letzter `market_snapshot`-Preis × EZB-Kurs; fehlt eine Bewertung, wird kein Gesamtwert gebildet (kein Teilnenner) |
-| FX | `fx_resolver.resolve_fx_rate`: nur direkte EUR-Paare der EZB, Kurs am oder vor dem Stichtag, höchstens 5 Tage alt (`fx_max_age_days`); `GBp` = 0,01 GBP |
+| FX | `fx_resolver.resolve_fx_rate`: direkte EUR-Paare der EZB; zwei andere Währungen nur über EUR trianguliert (`SOURCE → EUR → TARGET`, beide EUR-Kurse vom selben EZB-Tag, Quelle `ECB via EUR`), Kurs am oder vor dem Stichtag, höchstens 5 Tage alt (`fx_max_age_days`); `GBp` = 0,01 GBP |
 | Marktdaten | höchstens 5 Tage alt (`market_data_max_age_days`); Tagesänderung = `close / previous_close - 1` der beiden letzten Tagesbalken |
 | Einstandswert | `transaction_import._rebuild_position`: Durchschnittskostenmodell; BUY/TRANSFERIN erhöhen um Betrag + Gebühren + Steuern, SELL/TRANSFEROUT senken anteilig; Splits über `corporate_action` |
 | Realisierter Gewinn | `positions.realized_gain` (persistiert, Herkunft teils Parqet) |
